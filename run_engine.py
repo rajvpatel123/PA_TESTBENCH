@@ -1,7 +1,7 @@
-# engine/run_engine.py - COMPLETE FILE
 import threading
-import csv
 import time
+import csv
+import os
 import re
 from datetime import datetime
 from utils.logger import get_logger
@@ -9,26 +9,11 @@ from utils.logger import get_logger
 _logger = get_logger(__name__)
 
 
-def parse_channel(channel_str: str):
-    """Extract device name and channel number from a channel dropdown string.
-    Handles formats like:
-      'Gate Driver  [AgilentE3648AGPIB15]  CH1'
-      'AgilentE3648AGPIB15  CH1 (not connected)'
-    Returns (device_name, channel_int) or (None, None).
-    """
-    m = re.search(r'\[(.+?)\].*?CH(\d+)', channel_str)
-    if m:
-        return m.group(1).strip(), int(m.group(2))
-    m = re.search(r'^([^\s].+?)\s+CH(\d+)', channel_str)
-    if m:
-        return m.group(1).strip(), int(m.group(2))
-    return None, None
-
-
 class RunEngine:
+
     def __init__(self, driver_registry: dict, ramp_tab=None,
                  on_complete=None, on_step=None, on_error=None):
-        self._drivers     = driver_registry
+        self._registry    = driver_registry
         self._ramp_tab    = ramp_tab
         self._on_complete = on_complete
         self._on_step     = on_step
@@ -36,362 +21,442 @@ class RunEngine:
         self._stop_event  = threading.Event()
         self._thread      = None
 
-    # ── Public API ──────────────────────────────────────────────────
-
-    def start(self, sweep_plan: list, output_csv: str):
+    def start(self, plan_rows: list, output_path: str):
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            args=(sweep_plan, output_csv),
-            daemon=True
+            args=(plan_rows, output_path),
+            daemon=True,
         )
         self._thread.start()
 
     def stop(self):
         self._stop_event.set()
 
-    # ── Internal ────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    #  THREAD ENTRY
+    # ══════════════════════════════════════════════════════════
+    def _run(self, plan_rows: list, output_path: str):
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        except Exception:
+            pass
 
-    def _run(self, sweep_plan: list, output_csv: str):
         results = []
         try:
-            for i, step in enumerate(sweep_plan):
-                if self._stop_event.is_set():
-                    break
-                if self._on_step:
-                    self._on_step(i, "running")
-                try:
-                    row = self._execute_step(step, i)
-                    if row:
-                        results.append(row)
-                    if self._on_step:
-                        self._on_step(i, "done")
-                except Exception as e:
-                    if self._on_step:
-                        self._on_step(i, "error")
-                    if self._on_error:
-                        self._on_error(f"Step {i+1}: {str(e)}")
-                    break
-            self._write_csv(results, output_csv)
-        except Exception as e:
+            self._execute_steps(plan_rows, results, offset=0)
+        except _AbortRun as e:
+            _logger.warning(f"Run aborted: {e}")
             if self._on_error:
                 self._on_error(str(e))
-        finally:
-            if self._on_complete:
-                self._on_complete()
-
-    def _execute_step(self, step: dict, index: int) -> dict:
-        cmd    = step.get("command", "")
-        params = step.get("params", {})
-        ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row    = {"step": index + 1, "command": cmd, "timestamp": ts}
-
-        if cmd == "SET_BIAS":
-            self._set_bias(params, row)
-
-        elif cmd == "OUTPUT_ON":
-            self._set_output(params, True, row)
-
-        elif cmd == "OUTPUT_OFF":
-            self._set_output(params, False, row)
-
-        elif cmd == "RAMP":
-            self._execute_ramp(params, row)
-
-        elif cmd == "MEASURE":
-            self._measure(params, row)
-
-        elif cmd == "POWER_SWEEP":
-            self._power_sweep(params, row)
-
-        elif cmd == "WAIT":
-            time.sleep(params.get("seconds", 1.0))
-
-        elif cmd == "SCPI_COMMAND":
-            self._execute_scpi_command(params, row)
-
-        elif cmd == "SCPI_POLL":
-            self._execute_scpi_poll(params, row)
-
-        elif cmd == "SAVE_RESULTS":
-            pass  # handled at end of run
-
-        return row
-
-    # ── Bias / Output ───────────────────────────────────────────────
-
-    def _set_bias(self, params: dict, row: dict):
-        ch_str  = params.get("channel", "")
-        mode    = params.get("mode", "CV")
-        dev, ch = parse_channel(ch_str)
-        drv     = self._drivers.get(dev) if dev else None
-
-        if drv is None:
-            row["error"] = f"Driver not found for: {ch_str}"
+            self._write_csv(output_path, results)
             return
-
-        try:
-            if mode == "CV":
-                drv.set_voltage(ch, params["voltage"])
-                drv.set_current(ch, params["ocp"])
-            else:
-                drv.set_current(ch, params["current"])
-                drv.set_voltage(ch, params.get("ovp", 35.0))
-
-            drv.output_on(ch, True)
-            row["channel"] = ch_str
-            row["mode"]    = mode
-
-            target_ma = params.get("target_idq_ma")
-            if target_ma:
-                self._idq_target(drv, ch, params, row)
-
         except Exception as e:
-            row["error"] = str(e)
-
-    def _idq_target(self, drain_drv, drain_ch: int, params: dict, row: dict):
-        target   = params["target_idq_ma"]
-        tol      = params.get("tolerance_ma", 5.0)
-        step_mv  = params.get("gate_step_mv", 50.0) / 1000.0
-        abort_ma = params.get("hard_abort_ma") or target * 3
-
-        gate_str  = params.get("gate_channel", "")
-        gdev, gch = parse_channel(gate_str)
-        gate_drv  = self._drivers.get(gdev) if gdev else None
-        if gate_drv is None:
-            row["idq_error"] = "Gate driver not found for Idq targeting"
+            _logger.exception(f"Unhandled run error: {e}")
+            if self._on_error:
+                self._on_error(str(e))
+            self._write_csv(output_path, results)
             return
 
-        current_vg = float(params.get("voltage", -3.0))
-        for _ in range(100):
+        self._write_csv(output_path, results)
+        if self._on_complete:
+            self._on_complete()
+
+    # ══════════════════════════════════════════════════════════
+    #  STEP EXECUTOR  (recursive for LOOP)
+    # ══════════════════════════════════════════════════════════
+    def _execute_steps(self, plan_rows: list, results: list, offset: int = 0):
+        i = 0
+        while i < len(plan_rows):
             if self._stop_event.is_set():
-                break
-            try:
-                idq = drain_drv.measure_current(drain_ch) * 1000
-            except Exception:
-                break
-            row["idq_ma"] = round(idq, 3)
-            if idq > abort_ma:
-                row["idq_error"] = f"Hard abort: Idq {idq:.1f} mA > {abort_ma} mA"
-                break
-            if abs(idq - target) <= tol:
-                break
-            direction  = 1 if idq < target else -1
-            current_vg += direction * step_mv
-            try:
-                gate_drv.set_voltage(gch, current_vg)
-            except Exception:
-                break
-            time.sleep(0.1)
+                raise _AbortRun("User stopped the run.")
 
-    def _set_output(self, params: dict, state: bool, row: dict):
-        ch_str  = params.get("channel", "")
-        dev, ch = parse_channel(ch_str)
-        drv     = self._drivers.get(dev) if dev else None
+            row     = plan_rows[i]
+            cmd     = row.get("command", "").upper()
+            params  = row.get("params", {})
+            abs_idx = offset + i
+
+            # ── LOOP: gather inner block then recurse ──────────
+            if cmd == "LOOP":
+                count = int(params.get("count", 1))
+                label = params.get("label", "")
+                inner = []
+                j = i + 1
+                while j < len(plan_rows):
+                    if plan_rows[j].get("command", "").upper() == "LOOP":
+                        break
+                    inner.append(plan_rows[j])
+                    j += 1
+
+                self._notify_step(abs_idx, "running")
+                _logger.info(
+                    f"LOOP ×{count}  '{label}'  "
+                    f"({len(inner)} inner steps  idx={abs_idx})")
+
+                for iteration in range(count):
+                    if self._stop_event.is_set():
+                        raise _AbortRun("User stopped during loop.")
+                    _logger.info(f"  → iteration {iteration + 1}/{count}")
+                    self._execute_steps(inner, results, offset=abs_idx + 1)
+
+                self._notify_step(abs_idx, "done")
+                i = j
+                continue
+
+            # ── All other commands ─────────────────────────────
+            self._notify_step(abs_idx, "running")
+            try:
+                result = self._dispatch(cmd, params)
+                if isinstance(result, list):
+                    results.extend(result)
+                elif result:
+                    results.append(result)
+                self._notify_step(abs_idx, "done")
+            except _AbortRun:
+                self._notify_step(abs_idx, "error")
+                raise
+            except Exception as e:
+                self._notify_step(abs_idx, "error")
+                _logger.error(f"Step {abs_idx} ({cmd}) raised: {e}")
+                raise _AbortRun(f"Step {abs_idx + 1} ({cmd}) failed: {e}")
+
+            i += 1
+
+    # ══════════════════════════════════════════════════════════
+    #  COMMAND DISPATCHER
+    # ══════════════════════════════════════════════════════════
+    def _dispatch(self, cmd: str, params: dict):
+        handlers = {
+            "SET_BIAS":     self._cmd_set_bias,
+            "RAMP":         self._cmd_ramp,
+            "OUTPUT_ON":    self._cmd_output_on,
+            "OUTPUT_OFF":   self._cmd_output_off,
+            "POWER_SWEEP":  self._cmd_power_sweep,
+            "MEASURE":      self._cmd_measure,
+            "SAVE_RESULTS": self._cmd_save_results,
+            "WAIT":         self._cmd_wait,
+            "MESSAGE":      self._cmd_message,
+            "GROUP":        self._cmd_group,
+            "COND_ABORT":   self._cmd_cond_abort,
+            "SCPI_COMMAND": self._cmd_scpi_command,
+            "SCPI_POLL":    self._cmd_scpi_poll,
+        }
+        handler = handlers.get(cmd)
+        if handler:
+            return handler(params)
+        _logger.warning(f"Unknown command '{cmd}' — skipping.")
+        return None
+
+    # ══════════════════════════════════════════════════════════
+    #  INSTRUMENT RESOLVERS
+    # ══════════════════════════════════════════════════════════
+    def _get_sa(self):
+        SA_KEYS = ("MXA", "EXA", "PXA", "CXA", "N90", "E44",
+                   "FieldFox", "SpectrumAnalyzer", "SA")
+        for key in self._registry:
+            if any(k.lower() in key.lower() for k in SA_KEYS):
+                return self._registry[key]
+        return None
+
+    def _get_sg(self):
+        SG_KEYS = ("PSG", "MXG", "EXG", "N51", "N52", "E82",
+                   "SMW", "SMB", "SignalGenerator", "SG")
+        for key in self._registry:
+            if any(k.lower() in key.lower() for k in SG_KEYS):
+                return self._registry[key]
+        return None
+
+    def _resolve_channel(self, channel_str: str):
+        for key in self._registry:
+            if key in channel_str:
+                return self._registry[key]
+        return None
+
+    def _channel_number(self, channel_str: str) -> int:
+        m = re.search(r"CH(\d+)", channel_str)
+        return int(m.group(1)) if m else 1
+
+    # ══════════════════════════════════════════════════════════
+    #  BIASING HANDLERS
+    # ══════════════════════════════════════════════════════════
+    def _cmd_set_bias(self, p: dict):
+        channel = p.get("channel", "")
+        mode    = p.get("mode", "CV")
+        drv     = self._resolve_channel(channel)
         if drv is None:
-            row["error"] = f"Driver not found for: {ch_str}"
-            return
-        try:
-            drv.output_on(ch, state)
-            row["channel"] = ch_str
-            row["output"]  = "ON" if state else "OFF"
-        except Exception as e:
-            row["error"] = str(e)
-
-    # ── Ramp ────────────────────────────────────────────────────────
-
-    def _execute_ramp(self, params: dict, row: dict):
-        """
-        Execute ramp steps. When using the ramp editor, steps come back with
-        a 'supply' role ("Gate" / "Drain") which is resolved to a driver via
-        _resolve_supply_role(). Manual override still uses a raw channel string.
-        """
-        use_editor = params.get("use_ramp_editor", True)
-        steps      = []
-
-        if use_editor and self._ramp_tab:
-            steps = self._ramp_tab.get_ramp_steps()   # [{supply, voltage, current, dwell, label}]
+            raise _AbortRun(f"No driver found for channel: {channel!r}")
+        ch_num = self._channel_number(channel)
+        if mode == "CV":
+            drv.set_voltage(ch_num, p["voltage"])
+            drv.set_ocp(ch_num, p["ocp"])
         else:
-            ch_str = params.get("channel", "")
-            steps  = [{"channel": ch_str,
-                       "voltage": params.get("voltage", 0.0),
-                       "current": params.get("ocp", 1.0),
-                       "dwell":   0.1}]
+            drv.set_current(ch_num, p["current"])
+            drv.set_ovp(ch_num, p["ovp"])
+        _logger.info(f"SET_BIAS  ch={channel}  mode={mode}")
+        return None
 
-        for s in steps:
-            if self._stop_event.is_set():
-                break
+    def _cmd_ramp(self, p: dict):
+        use_editor = p.get("use_ramp_editor", True)
+        direction  = p.get("direction", "up")
+        if use_editor and self._ramp_tab is not None:
+            steps = self._ramp_tab.get_ramp_steps()
+            if direction == "down":
+                steps = list(reversed(steps))
+            for step in steps:
+                if self._stop_event.is_set():
+                    raise _AbortRun("Stopped during ramp.")
+                channel = step.get("channel", "")
+                drv     = self._resolve_channel(channel)
+                if drv is None:
+                    continue
+                drv.set_voltage(self._channel_number(channel), step.get("voltage", 0.0))
+                time.sleep(step.get("dwell_ms", 100) / 1000.0)
+        else:
+            channel = p.get("channel", "")
+            drv     = self._resolve_channel(channel)
+            if drv is None:
+                raise _AbortRun(f"No driver for ramp channel: {channel!r}")
+            drv.set_voltage(self._channel_number(channel), p.get("voltage", 0.0))
+            drv.set_ocp(self._channel_number(channel), p.get("ocp", 1.0))
+        _logger.info(f"RAMP  direction={direction}")
+        return None
 
-            # Ramp editor steps use supply role; manual override uses channel string
-            if "supply" in s:
-                drv, ch = self._resolve_supply_role(s["supply"])
-            else:
-                dev, ch = parse_channel(s.get("channel", ""))
-                drv     = self._drivers.get(dev) if dev else None
-
-            if drv:
-                try:
-                    drv.set_voltage(ch, s["voltage"])
-                    drv.set_current(ch, s.get("current", 1.0))
-                    _logger.debug(
-                        f"Ramp step '{s.get('label', '')}': "
-                        f"{s['voltage']} V / {s.get('current', 1.0)} A"
-                    )
-                except Exception as e:
-                    row["error"] = str(e)
-                    _logger.error(f"Ramp step error: {e}")
-            else:
-                _logger.warning(
-                    f"Ramp step '{s.get('label', '')}': "
-                    f"no driver resolved for supply '{s.get('supply', s.get('channel', '?'))}'"
-                )
-
-            time.sleep(s.get("dwell", 0.1))
-
-    def _resolve_supply_role(self, role: str):
-        """
-        Resolve a supply role label ("Gate" or "Drain") to (driver, channel).
-        Checks driver registry keys for a case-insensitive match on the role word,
-        then falls back to the first driver that has set_voltage.
-        Returns (driver, 1) or (None, None).
-        """
-        role_lower = role.lower()
-        for name, drv in self._drivers.items():
-            if role_lower in name.lower() and hasattr(drv, "set_voltage"):
-                return drv, 1
-        # Fallback — first power supply found
-        for name, drv in self._drivers.items():
-            if hasattr(drv, "set_voltage"):
-                return drv, 1
-        return None, None
-
-    # ── Measurement ─────────────────────────────────────────────────
-
-    def _measure(self, params: dict, row: dict):
-        drv = self._drivers.get("PXAN9030A")
-        if drv:
-            try:
-                row["power_dbm"] = drv.get_marker_power()
-                row["freq_hz"]   = drv.get_marker_freq()
-            except Exception as e:
-                row["error"] = str(e)
-
-    def _power_sweep(self, params: dict, row: dict):
-        sg = self._drivers.get("RSSMBV100B")
-        sa = self._drivers.get("PXAN9030A")
-        if not sg or not sa:
-            row["error"] = "Sig gen or spec an not connected"
-            return
-
-        start = params.get("start_dbm", -20.0)
-        stop  = params.get("stop_dbm",  10.0)
-        step  = params.get("step_db",   1.0)
-        dwell = params.get("dwell_ms",  200) / 1000.0
-        pwr   = start
-
-        while pwr <= stop:
-            if self._stop_event.is_set():
-                break
-            try:
-                sg.set_rf_level(pwr)
-                time.sleep(dwell)
-                pout = sa.get_marker_power()
-                row[f"pout_{pwr:.1f}dBm"] = pout
-            except Exception as e:
-                row["error"] = str(e)
-                break
-            pwr += step
-
-    # ── SCPI ────────────────────────────────────────────────────────
-
-    def _execute_scpi_command(self, params: dict, row: dict):
-        """Send a fire-and-forget SCPI write to a named instrument."""
-        instrument = params.get("instrument", "").strip()
-        command    = params.get("command", "").strip()
-
-        if not instrument or not command:
-            row["error"] = "SCPI Command: instrument and command must not be empty"
-            _logger.warning(row["error"])
-            return
-
-        drv = self._drivers.get(instrument)
+    def _cmd_output_on(self, p: dict):
+        channel = p.get("channel", "")
+        drv     = self._resolve_channel(channel)
         if drv is None:
-            row["error"] = f"SCPI Command: instrument '{instrument}' not found in registry"
-            _logger.warning(row["error"])
-            return
+            raise _AbortRun(f"No driver for OUTPUT_ON: {channel!r}")
+        drv.output_on(self._channel_number(channel))
+        _logger.info(f"OUTPUT_ON  ch={channel}")
+        return None
 
-        try:
-            drv.write(command)
-            row["scpi_command"] = command
-            _logger.info(f"SCPI CMD [{instrument}]: {command}")
-        except Exception as e:
-            row["error"] = f"SCPI Command failed: {e}"
-            _logger.error(row["error"])
-
-    def _execute_scpi_poll(self, params: dict, row: dict):
-        """
-        Repeatedly query an instrument until the response matches `expected`
-        or the timeout expires. Polls every 250 ms.
-        If `expected` is blank, the first successful response is treated as a pass.
-        """
-        instrument = params.get("instrument", "").strip()
-        query      = params.get("query", "").strip()
-        expected   = params.get("expected", "").strip()
-        timeout_s  = float(params.get("timeout", 10.0))
-
-        if not instrument or not query:
-            row["error"] = "SCPI Poll: instrument and query must not be empty"
-            _logger.warning(row["error"])
-            return
-
-        drv = self._drivers.get(instrument)
+    def _cmd_output_off(self, p: dict):
+        channel = p.get("channel", "")
+        drv     = self._resolve_channel(channel)
         if drv is None:
-            row["error"] = f"SCPI Poll: instrument '{instrument}' not found in registry"
-            _logger.warning(row["error"])
-            return
+            raise _AbortRun(f"No driver for OUTPUT_OFF: {channel!r}")
+        drv.output_off(self._channel_number(channel))
+        _logger.info(f"OUTPUT_OFF  ch={channel}")
+        return None
 
-        deadline      = time.time() + timeout_s
-        last_response = ""
+    # ══════════════════════════════════════════════════════════
+    #  MEASUREMENT HANDLERS
+    # ══════════════════════════════════════════════════════════
+    def _cmd_power_sweep(self, p: dict):
+        start_dbm = float(p.get("start_dbm", -20.0))
+        stop_dbm  = float(p.get("stop_dbm",   10.0))
+        step_db   = float(p.get("step_db",     1.0))
+        dwell_ms  = float(p.get("dwell_ms",  200.0))
 
-        while time.time() < deadline:
+        sg = self._get_sg()
+        sa = self._get_sa()
+
+        if sg is None:
+            raise _AbortRun("POWER_SWEEP: no Signal Generator found in registry.")
+        if sa is None:
+            raise _AbortRun("POWER_SWEEP: no Spectrum Analyzer found in registry.")
+
+        n      = int(abs(stop_dbm - start_dbm) / step_db) + 1
+        points = [start_dbm + i * step_db for i in range(n)]
+
+        _logger.info(
+            f"POWER_SWEEP  {start_dbm} → {stop_dbm} dBm  "
+            f"step {step_db} dB  {n} points")
+
+        sweep_results = []
+        for pin_dbm in points:
             if self._stop_event.is_set():
-                row["error"] = "SCPI Poll: aborted by stop event"
-                _logger.warning(row["error"])
-                return
-            try:
-                last_response = drv.query(query).strip()
-                _logger.debug(
-                    f"SCPI POLL [{instrument}] {query!r} → {last_response!r}"
-                )
-                if not expected or last_response == expected:
-                    row["scpi_poll_response"] = last_response
-                    _logger.info(
-                        f"SCPI Poll matched on [{instrument}]: {last_response!r}"
-                    )
-                    return
-            except Exception as e:
-                _logger.warning(f"SCPI Poll query error: {e}")
+                raise _AbortRun("Stopped during power sweep.")
+
+            sg.write(f":POW {pin_dbm:.3f} DBM")
+            time.sleep(dwell_ms / 1000.0)
+
+            sa.write(":INIT:IMM")
+            sa.query("*OPC?")
+            sa.write(":CALC:MARK1:MAX")
+            pout_dbm = float(sa.query(":CALC:MARK1:Y?"))
+
+            gain_db = pout_dbm - pin_dbm
+
+            _logger.debug(
+                f"  Pin={pin_dbm:.1f} dBm  Pout={pout_dbm:.2f} dBm  "
+                f"Gain={gain_db:.2f} dB")
+
+            sweep_results.append({
+                "command":   "POWER_SWEEP",
+                "pin_dbm":   pin_dbm,
+                "pout_dbm":  pout_dbm,
+                "gain_db":   gain_db,
+                "timestamp": datetime.now().isoformat(),
+            })
+
+        return sweep_results
+
+    def _cmd_measure(self, p: dict):
+        notes = p.get("notes", "")
+        sa    = self._get_sa()
+
+        if sa is None:
+            _logger.warning("MEASURE: no SA in registry — logging note only.")
+            return {
+                "command":   "MEASURE",
+                "notes":     notes,
+                "pout_dbm":  None,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        sa.write(":INIT:IMM")
+        sa.query("*OPC?")
+        sa.write(":CALC:MARK1:MAX")
+        pout_dbm = float(sa.query(":CALC:MARK1:Y?"))
+
+        _logger.info(f"MEASURE  Pout={pout_dbm:.2f} dBm  notes={notes!r}")
+
+        return {
+            "command":   "MEASURE",
+            "notes":     notes,
+            "pout_dbm":  pout_dbm,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _cmd_save_results(self, p: dict):
+        _logger.info(f"SAVE_RESULTS  filename={p.get('filename', '(auto)')}")
+        return None
+
+    # ══════════════════════════════════════════════════════════
+    #  FLOW HANDLERS
+    # ══════════════════════════════════════════════════════════
+    def _cmd_wait(self, p: dict):
+        seconds = float(p.get("seconds", 1.0))
+        _logger.info(f"WAIT  {seconds} s")
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                raise _AbortRun("Stopped during wait.")
+            time.sleep(min(0.1, deadline - time.monotonic()))
+        return {
+            "command":   "WAIT",
+            "seconds":   seconds,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _cmd_message(self, p: dict):
+        text = p.get("text", "")
+        _logger.info(f"MESSAGE: {text}")
+        return {
+            "command":   "MESSAGE",
+            "text":      text,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _cmd_group(self, p: dict):
+        _logger.debug(f"GROUP  label={p.get('label', '')} (no-op)")
+        return None
+
+    def _cmd_cond_abort(self, p: dict):
+        channel      = p.get("channel", "")
+        threshold_ma = float(p.get("threshold_ma", 500.0))
+        condition    = p.get("condition", ">")
+
+        drv = self._resolve_channel(channel)
+        if drv is None:
+            _logger.warning(
+                f"COND_ABORT: no driver for {channel!r} — skipping check")
+            return None
+
+        ch_num     = self._channel_number(channel)
+        current_a  = drv.measure_current(ch_num)
+        current_ma = current_a * 1000.0
+
+        triggered = (
+            (condition == ">"  and current_ma >  threshold_ma) or
+            (condition == "<"  and current_ma <  threshold_ma) or
+            (condition == ">=" and current_ma >= threshold_ma) or
+            (condition == "<=" and current_ma <= threshold_ma)
+        )
+
+        if triggered:
+            msg = (f"COND_ABORT triggered: {channel} "
+                   f"I={current_ma:.1f} mA {condition} {threshold_ma} mA")
+            _logger.error(msg)
+            raise _AbortRun(msg)
+
+        _logger.info(
+            f"COND_ABORT OK: I={current_ma:.1f} mA "
+            f"(limit {condition} {threshold_ma} mA)")
+        return None
+
+    # ══════════════════════════════════════════════════════════
+    #  SCPI HANDLERS
+    # ══════════════════════════════════════════════════════════
+    def _cmd_scpi_command(self, p: dict):
+        inst_name = p.get("instrument", "")
+        command   = p.get("command",    "")
+        drv       = self._registry.get(inst_name)
+        if drv is None:
+            raise _AbortRun(
+                f"SCPI_COMMAND: instrument not in registry: {inst_name!r}")
+        drv.write(command)
+        _logger.info(f"SCPI_COMMAND  {inst_name} ← {command!r}")
+        return None
+
+    def _cmd_scpi_poll(self, p: dict):
+        inst_name = p.get("instrument", "")
+        query     = p.get("query",      "")
+        expected  = p.get("expected",   "").strip()
+        timeout_s = float(p.get("timeout_s", 10.0))
+
+        drv = self._registry.get(inst_name)
+        if drv is None:
+            raise _AbortRun(
+                f"SCPI_POLL: instrument not in registry: {inst_name!r}")
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._stop_event.is_set():
+                raise _AbortRun("Stopped during SCPI poll.")
+            response = str(drv.query(query)).strip()
+            if not expected or response == expected:
+                _logger.info(
+                    f"SCPI_POLL ✓  {inst_name}  "
+                    f"{query!r} → {response!r}")
+                return None
+            _logger.debug(
+                f"SCPI_POLL waiting  got={response!r}  want={expected!r}")
             time.sleep(0.25)
 
-        # Timed out without a match
-        row["error"] = (
-            f"SCPI Poll timed out after {timeout_s}s — "
-            f"last response: {last_response!r}, expected: {expected!r}"
-        )
-        _logger.error(row["error"])
+        raise _AbortRun(
+            f"SCPI_POLL timeout ({timeout_s} s): "
+            f"{inst_name} query={query!r} expected={expected!r}")
 
-    # ── CSV output ──────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    #  HELPERS
+    # ══════════════════════════════════════════════════════════
+    def _notify_step(self, idx: int, status: str):
+        if self._on_step:
+            try:
+                self._on_step(idx, status)
+            except Exception:
+                pass
 
-    def _write_csv(self, results: list, path: str):
+    def _write_csv(self, path: str, results: list):
         if not results:
             return
-        import os
-        os.makedirs(
-            os.path.dirname(path) if os.path.dirname(path) else ".",
-            exist_ok=True
-        )
-        keys = list(dict.fromkeys(k for r in results for k in r))
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(results)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            keys = sorted({k for row in results for k in row})
+            with open(path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(results)
+            _logger.info(f"Results written → {path}  ({len(results)} rows)")
+        except Exception as e:
+            _logger.error(f"Failed to write CSV {path}: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  INTERNAL EXCEPTION
+# ══════════════════════════════════════════════════════════════
+class _AbortRun(Exception):
+    """Raised internally to cleanly abort a run with a reason message."""
+    pass
