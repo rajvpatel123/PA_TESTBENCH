@@ -64,7 +64,7 @@ ACTION_DEFAULTS = {
     "idq_optimize":        {"drain_channel": "", "gate_channel": "",
                             "target_ma": 100.0, "tolerance_ma": 5.0,
                             "step_mv": 50.0, "max_ma": ""},
-    "power_sweep":         {"start_dbm": -20.0, "stop_dbm": 10.0, "step_db": 1.0, "dwell_ms": 200},
+    "power_sweep":         {"start_dbm": -20.0, "stop_dbm": 10.0, "step_db": 1.0, "dwell_ms": 200, "drain_channel": "","drain_channel": ""},
     "perform_measurement": {"notes": ""},
     "gain_compression":    {"compression_db": 1.0, "start_dbm": -20.0, "stop_dbm": 20.0, "step_db": 0.5},
     "acpr":                {"center_hz": 1e9, "offset_hz": 5e6, "bw_hz": 1e6},
@@ -713,12 +713,25 @@ class SweepPlanTab(ttk.Frame):
         stop_var  = tk.StringVar(value=str(p.get("stop",    -2.0)))
         step_var  = tk.StringVar(value=str(p.get("step",     0.5)))
         dwell_var = tk.StringVar(value=str(p.get("dwell_ms", 500)))
-
+        drain_var = tk.StringVar(value=str(p.get("drain_channel", "")))
+        freq_var  = tk.StringVar(value=str(p.get("freq_ghz", "")))
+        
         self._channel_row(f, "Channel:",  ch_var,   0)
         self._field_row(f, "Start (V):",  start_var, 2, hint="e.g. -6.0")
         self._field_row(f, "Stop (V):",   stop_var,  3, hint="e.g. -2.0")
         self._field_row(f, "Step (V):",   step_var,  4, hint="e.g. 0.5")
         self._field_row(f, "Dwell (ms):", dwell_var, 5, hint="Settle time per point")
+        self._field_row(f, "Freq (GHz):",  freq_var,  4, hint="e.g. 2.4  — logged to CSV")
+        
+        ttk.Separator(f, orient="horizontal").grid(
+            row=5, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
+        ttk.Label(f, text="DC Logging", font=("Segoe UI", 9, "bold")).grid(
+            row=6, column=0, columnspan=3, padx=8, sticky="w")
+        ttk.Label(f, text="Select drain channel to log Vdd, Idd, PAE, DE per point.",
+                  foreground="gray", font=("Segoe UI", 7), justify="left").grid(
+                  row=7, column=0, columnspan=3, padx=8, sticky="w")
+        self._channel_row(f, "Drain Channel:", drain_var, 8)
+
 
         preview_lbl = ttk.Label(f, text="", foreground="gray", font=("Segoe UI", 8))
         preview_lbl.grid(row=6, column=0, columnspan=3, padx=8, pady=(0, 4))
@@ -737,23 +750,24 @@ class SweepPlanTab(ttk.Frame):
         def apply():
             try:
                 params = {
-                    "channel":  ch_var.get(),
-                    "start":    float(start_var.get()),
-                    "stop":     float(stop_var.get()),
-                    "step":     float(step_var.get()),
-                    "dwell_ms": int(dwell_var.get()),
+                    "start_dbm":     float(start_var.get()),
+                    "stop_dbm":      float(stop_var.get()),
+                    "step_db":       float(step_var.get()),
+                    "dwell_ms":      int(dwell_var.get()),
+                    "freq_ghz":      freq_var.get().strip(),
+                    "drain_channel": drain_var.get().strip(),
                 }
             except ValueError:
                 messagebox.showerror("Invalid Input", "All fields must be valid numbers.")
                 return
-            if params["step"] <= 0:
-                messagebox.showerror("Invalid Step", "Step size must be greater than 0.")
+            if params["step_db"] <= 0:
+                messagebox.showerror("Invalid Step", "Step must be > 0.")
                 return
-            self._plan[idx]["params"].update(params)
+            self._get_step(path)["params"].update(params)
             self._refresh_plan_tree()
-            self._set_status(f"Step {idx+1} updated: Bias sweep")
+            self._set_status(f"Step {self._path_label(path)} updated: Power sweep")
+        self._apply_btn(f, 11, apply)
 
-        self._apply_btn(f, 7, apply)
 
     def _props_idq_optimize(self, idx: int):
         p = self._plan[idx]["params"]
@@ -1669,8 +1683,20 @@ class SweepPlanTab(ttk.Frame):
         self._set_run_status("error")
         self._set_status(f"Error: {msg}", "red")
 
-    def _on_step_update(self, index: int, status: str):
-        iid = str(index)
+    def _on_step_update(self, iid: str, status: str):
+        if not self.plan_tree.exists(iid):
+            return
+        tag_map = {
+            "running": ("#1a5276", "white"),
+            "done":    ("#1e8449", "white"),
+            "error":   ("#922b21", "white"),
+        }
+        if status in tag_map:
+            bg, fg = tag_map[status]
+            self.plan_tree.tag_configure(status, background=bg, foreground=fg)
+            self.plan_tree.item(iid, tags=(status,))
+            if status == "running":
+                self.plan_tree.see(iid)
         if not self.plan_tree.exists(iid):
             return
         if status == "running":
@@ -1704,29 +1730,40 @@ class SweepPlanTab(ttk.Frame):
         return list(self._plan)
 
     def get_sweep_plan_rows(self) -> list:
+        return self._serialize_steps(self._plan)
+
+    def _serialize_steps(self, steps: list) -> list:
         rows = []
-        for step in self._plan:
+        for step in steps:
             t = step.get("type", "")
             p = step.get("params", {})
 
-            if t == "set_gate_bias":
+            if t == "loop":
+                rows.append({
+                    "command":  "LOOP",
+                    "params":   {"count": int(p.get("count", 1)), "label": p.get("label", "")},
+                    "children": self._serialize_steps(step.get("children", [])),
+                })
+
+            elif t == "group":
+                rows.append({
+                    "command":  "GROUP",
+                    "params":   {"label": p.get("label", ""), "collapsed": p.get("collapsed", False)},
+                    "children": self._serialize_steps(step.get("children", [])),
+                })
+
+            elif t == "set_gate_bias":
                 rows.append({"command": "SET_BIAS", "params": {
-                    "channel": p.get("channel", ""),
-                    "mode":    p.get("mode", "CV"),
-                    "voltage": p.get("voltage", 0.0),
-                    "ocp":     p.get("ocp", 0.1),
-                    "current": p.get("current", 0.01),
-                    "ovp":     p.get("ovp", 5.0),
+                    "channel": p.get("channel", ""), "mode": p.get("mode", "CV"),
+                    "voltage": p.get("voltage", 0.0), "ocp": p.get("ocp", 0.1),
+                    "current": p.get("current", 0.01), "ovp": p.get("ovp", 5.0),
                 }})
 
             elif t == "set_drain_bias":
                 rows.append({"command": "SET_BIAS", "params": {
-                    "channel":       p.get("channel", ""),
-                    "mode":          p.get("mode", "CV"),
-                    "voltage":       p.get("voltage", 0.0),
-                    "ocp":           p.get("ocp", 2.0),
-                    "current":       p.get("current", 1.0),
-                    "ovp":           p.get("ovp", 35.0),
+                    "channel": p.get("channel", ""), "mode": p.get("mode", "CV"),
+                    "voltage": p.get("voltage", 0.0), "ocp": p.get("ocp", 2.0),
+                    "current": p.get("current", 1.0), "ovp": p.get("ovp", 35.0),
                     "target_idq_ma": p.get("target_idq_ma"),
                     "tolerance_ma":  p.get("tolerance_ma", 5),
                     "gate_step_mv":  p.get("gate_step_mv", 50),
@@ -1749,7 +1786,15 @@ class SweepPlanTab(ttk.Frame):
                 rows.append({"command": "OUTPUT_OFF", "params": {"channel": p.get("channel", "")}})
 
             elif t == "power_sweep":
-                rows.append({"command": "POWER_SWEEP", "params": p})
+                rows.append({"command": "POWER_SWEEP", "params": {
+                    "start_dbm":     p.get("start_dbm",    -20.0),
+                    "stop_dbm":      p.get("stop_dbm",      10.0),
+                    "step_db":       p.get("step_db",        1.0),
+                    "dwell_ms":      p.get("dwell_ms",      200),
+                    "freq_ghz":      p.get("freq_ghz",       ""),
+                    "drain_channel": p.get("drain_channel",  ""),
+                }})
+
 
             elif t == "perform_measurement":
                 rows.append({"command": "MEASURE", "params": p})
@@ -1763,18 +1808,6 @@ class SweepPlanTab(ttk.Frame):
             elif t == "message":
                 rows.append({"command": "MESSAGE", "params": {"text": p.get("text", "")}})
 
-            elif t == "loop":
-                rows.append({"command": "LOOP", "params": {
-                    "count": int(p.get("count", 1)),
-                    "label": p.get("label", ""),
-                }})
-
-            elif t == "group":
-                rows.append({"command": "GROUP", "params": {
-                    "label":     p.get("label", ""),
-                    "collapsed": p.get("collapsed", False),
-                }})
-
             elif t == "cond_abort":
                 rows.append({"command": "COND_ABORT", "params": {
                     "channel":      p.get("channel", ""),
@@ -1785,14 +1818,14 @@ class SweepPlanTab(ttk.Frame):
             elif t == "scpi_command":
                 rows.append({"command": "SCPI_COMMAND", "params": {
                     "instrument": p.get("instrument", ""),
-                    "command":    p.get("command",    ""),
+                    "command":    p.get("command", ""),
                 }})
 
             elif t == "scpi_poll":
                 rows.append({"command": "SCPI_POLL", "params": {
                     "instrument": p.get("instrument", ""),
-                    "query":      p.get("query",      ""),
-                    "expected":   p.get("expected",   ""),
+                    "query":      p.get("query", ""),
+                    "expected":   p.get("expected", ""),
                     "timeout_s":  float(p.get("timeout_s", 10.0)),
                 }})
 
@@ -1800,6 +1833,7 @@ class SweepPlanTab(ttk.Frame):
                 rows.append({"command": t.upper(), "params": p})
 
         return rows
+
 
 
 # ══════════════════════════════════════════════════════════════

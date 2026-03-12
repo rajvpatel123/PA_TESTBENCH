@@ -44,7 +44,7 @@ class RunEngine:
 
         results = []
         try:
-            self._execute_steps(plan_rows, results, offset=0)
+            self._execute_steps(plan_rows, results, path_prefix="")
         except _AbortRun as e:
             _logger.warning(f"Run aborted: {e}")
             if self._on_error:
@@ -65,62 +65,77 @@ class RunEngine:
     # ══════════════════════════════════════════════════════════
     #  STEP EXECUTOR  (recursive for LOOP)
     # ══════════════════════════════════════════════════════════
-    def _execute_steps(self, plan_rows: list, results: list, offset: int = 0):
+    def _execute_steps(self, plan_rows: list, results: list, path_prefix: str = ""):
         i = 0
         while i < len(plan_rows):
             if self._stop_event.is_set():
                 raise _AbortRun("User stopped the run.")
 
-            row     = plan_rows[i]
-            cmd     = row.get("command", "").upper()
-            params  = row.get("params", {})
-            abs_idx = offset + i
+            row    = plan_rows[i]
+            cmd    = row.get("command", "").upper()
+            params = row.get("params", {})
+            iid    = f"{path_prefix}{i}" if not path_prefix else f"{path_prefix}.{i}"
 
-            # ── LOOP: gather inner block then recurse ──────────
             if cmd == "LOOP":
                 count = int(params.get("count", 1))
                 label = params.get("label", "")
-                inner = []
-                j = i + 1
-                while j < len(plan_rows):
-                    if plan_rows[j].get("command", "").upper() == "LOOP":
-                        break
-                    inner.append(plan_rows[j])
-                    j += 1
 
-                self._notify_step(abs_idx, "running")
-                _logger.info(
-                    f"LOOP ×{count}  '{label}'  "
-                    f"({len(inner)} inner steps  idx={abs_idx})")
+                # Try nested children first (future nested UI)
+                children = row.get("children", [])
+
+                # Fallback: flat plan — collect all steps after this LOOP marker
+                if not children:
+                    j = i + 1
+                    while j < len(plan_rows):
+                        if plan_rows[j].get("command", "").upper() == "LOOP":
+                            break
+                        children.append(plan_rows[j])
+                        j += 1
+                    skip_to = j  # remember where to jump after loop
+                else:
+                    skip_to = i + 1
+
+                self._notify_step(iid, "running")
+                _logger.info(f"LOOP x{count}  '{label}'  ({len(children)} inner steps  iid={iid})")
 
                 for iteration in range(count):
                     if self._stop_event.is_set():
                         raise _AbortRun("User stopped during loop.")
-                    _logger.info(f"  → iteration {iteration + 1}/{count}")
-                    self._execute_steps(inner, results, offset=abs_idx + 1)
+                    _logger.info(f"  -> iteration {iteration + 1}/{count}")
+                    self._execute_steps(children, results, path_prefix=iid)
 
-                self._notify_step(abs_idx, "done")
-                i = j
+                self._notify_step(iid, "done")
+                i = skip_to
                 continue
 
-            # ── All other commands ─────────────────────────────
-            self._notify_step(abs_idx, "running")
+
+            if cmd == "GROUP":
+                children = row.get("children", [])
+                self._notify_step(iid, "running")
+                _logger.debug(f"GROUP  label={params.get('label', '')}  iid={iid}")
+                self._execute_steps(children, results, path_prefix=iid)
+                self._notify_step(iid, "done")
+                i += 1
+                continue
+
+            self._notify_step(iid, "running")
             try:
                 result = self._dispatch(cmd, params)
                 if isinstance(result, list):
                     results.extend(result)
                 elif result:
                     results.append(result)
-                self._notify_step(abs_idx, "done")
+                self._notify_step(iid, "done")
             except _AbortRun:
-                self._notify_step(abs_idx, "error")
+                self._notify_step(iid, "error")
                 raise
             except Exception as e:
-                self._notify_step(abs_idx, "error")
-                _logger.error(f"Step {abs_idx} ({cmd}) raised: {e}")
-                raise _AbortRun(f"Step {abs_idx + 1} ({cmd}) failed: {e}")
+                self._notify_step(iid, "error")
+                _logger.error(f"Step {iid} ({cmd}) raised: {e}")
+                raise _AbortRun(f"Step {iid} ({cmd}) failed: {e}")
 
             i += 1
+
 
     # ══════════════════════════════════════════════════════════
     #  COMMAND DISPATCHER
@@ -151,16 +166,14 @@ class RunEngine:
     #  INSTRUMENT RESOLVERS
     # ══════════════════════════════════════════════════════════
     def _get_sa(self):
-        SA_KEYS = ("MXA", "EXA", "PXA", "CXA", "N90", "E44",
-                   "FieldFox", "SpectrumAnalyzer", "SA")
+        SA_KEYS = ("N9030", "PXA", "MXA", "EXA", "SpectrumAnalyzer", "SA")
         for key in self._registry:
             if any(k.lower() in key.lower() for k in SA_KEYS):
                 return self._registry[key]
         return None
 
     def _get_sg(self):
-        SG_KEYS = ("PSG", "MXG", "EXG", "N51", "N52", "E82",
-                   "SMW", "SMB", "SignalGenerator", "SG")
+        SG_KEYS = ("SMBV", "SMB", "SMW", "PSG", "MXG", "EXG", "SignalGenerator", "SG")
         for key in self._registry:
             if any(k.lower() in key.lower() for k in SG_KEYS):
                 return self._registry[key]
@@ -243,10 +256,12 @@ class RunEngine:
     #  MEASUREMENT HANDLERS
     # ══════════════════════════════════════════════════════════
     def _cmd_power_sweep(self, p: dict):
-        start_dbm = float(p.get("start_dbm", -20.0))
-        stop_dbm  = float(p.get("stop_dbm",   10.0))
-        step_db   = float(p.get("step_db",     1.0))
-        dwell_ms  = float(p.get("dwell_ms",  200.0))
+        start_dbm     = float(p.get("start_dbm",    -20.0))
+        stop_dbm      = float(p.get("stop_dbm",      10.0))
+        step_db       = float(p.get("step_db",        1.0))
+        dwell_ms      = float(p.get("dwell_ms",      200.0))
+        freq_ghz      = p.get("freq_ghz",      "")
+        drain_channel = p.get("drain_channel", "")
 
         sg = self._get_sg()
         sa = self._get_sa()
@@ -256,41 +271,69 @@ class RunEngine:
         if sa is None:
             raise _AbortRun("POWER_SWEEP: no Spectrum Analyzer found in registry.")
 
+        # Resolve drain PSU driver for DC logging (optional)
+        drain_drv = self._resolve_channel(drain_channel) if drain_channel else None
+        drain_ch  = self._channel_number(drain_channel)  if drain_channel else 1
+
         n      = int(abs(stop_dbm - start_dbm) / step_db) + 1
         points = [start_dbm + i * step_db for i in range(n)]
 
         _logger.info(
-            f"POWER_SWEEP  {start_dbm} → {stop_dbm} dBm  "
-            f"step {step_db} dB  {n} points")
+            f"POWER_SWEEP  {start_dbm} -> {stop_dbm} dBm  "
+            f"step {step_db} dB  {n} points  "
+            f"freq={freq_ghz} GHz  drain={drain_channel or 'none'}")
 
         sweep_results = []
         for pin_dbm in points:
             if self._stop_event.is_set():
                 raise _AbortRun("Stopped during power sweep.")
 
+            # Set SG power
             sg.write(f":POW {pin_dbm:.3f} DBM")
             time.sleep(dwell_ms / 1000.0)
 
+            # Read SA
             sa.write(":INIT:IMM")
             sa.query("*OPC?")
             sa.write(":CALC:MARK1:MAX")
             pout_dbm = float(sa.query(":CALC:MARK1:Y?"))
+            gain_db  = pout_dbm - pin_dbm
 
-            gain_db = pout_dbm - pin_dbm
+            # Read PSU DC values if drain channel provided
+            vdd = idd = pdc_w = de_pct = pae_pct = None
+            if drain_drv:
+                try:
+                    vdd   = drain_drv.measure_voltage(drain_ch)
+                    idd   = drain_drv.measure_current(drain_ch)
+                    pdc_w = vdd * idd
+                    pout_w = 10 ** ((pout_dbm - 30) / 10)
+                    pin_w  = 10 ** ((pin_dbm  - 30) / 10)
+                    de_pct  = (pout_w / pdc_w)            * 100 if pdc_w > 0 else 0
+                    pae_pct = ((pout_w - pin_w) / pdc_w)  * 100 if pdc_w > 0 else 0
+                except Exception as e:
+                    _logger.warning(f"DC readback failed at Pin={pin_dbm}: {e}")
 
             _logger.debug(
-                f"  Pin={pin_dbm:.1f} dBm  Pout={pout_dbm:.2f} dBm  "
-                f"Gain={gain_db:.2f} dB")
+                f"  Pin={pin_dbm:.1f}  Pout={pout_dbm:.2f}  "
+                f"Gain={gain_db:.2f}  "
+                f"Vdd={vdd}  Idd={idd}  PAE={pae_pct}")
 
             sweep_results.append({
                 "command":   "POWER_SWEEP",
-                "pin_dbm":   pin_dbm,
-                "pout_dbm":  pout_dbm,
-                "gain_db":   gain_db,
+                "freq_ghz":  freq_ghz,
+                "pin_dbm":   round(pin_dbm,  3),
+                "pout_dbm":  round(pout_dbm, 3),
+                "gain_db":   round(gain_db,  3),
+                "vdd_v":     round(vdd,  3)     if vdd     is not None else "",
+                "idd_a":     round(idd,  4)     if idd     is not None else "",
+                "pdc_w":     round(pdc_w,  4)   if pdc_w   is not None else "",
+                "de_pct":    round(de_pct,  2)  if de_pct  is not None else "",
+                "pae_pct":   round(pae_pct, 2)  if pae_pct is not None else "",
                 "timestamp": datetime.now().isoformat(),
             })
 
         return sweep_results
+
 
     def _cmd_measure(self, p: dict):
         notes = p.get("notes", "")
@@ -419,7 +462,7 @@ class RunEngine:
             if not expected or response == expected:
                 _logger.info(
                     f"SCPI_POLL ✓  {inst_name}  "
-                    f"{query!r} → {response!r}")
+                    f"{query!r} -> {response!r}")
                 return None
             _logger.debug(
                 f"SCPI_POLL waiting  got={response!r}  want={expected!r}")
@@ -443,13 +486,15 @@ class RunEngine:
         if not results:
             return
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            dirpath = os.path.dirname(path)
+            if dirpath:
+                os.makedirs(dirpath, exist_ok=True)
             keys = sorted({k for row in results for k in row})
             with open(path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=keys)
                 writer.writeheader()
                 writer.writerows(results)
-            _logger.info(f"Results written → {path}  ({len(results)} rows)")
+            _logger.info(f"Results written to {path}  ({len(results)} rows)")
         except Exception as e:
             _logger.error(f"Failed to write CSV {path}: {e}")
 
