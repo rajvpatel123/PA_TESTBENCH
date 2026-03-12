@@ -80,7 +80,6 @@ def main():
     ramp_tab    = RampEditorTab(notebook)
     sweep_tab   = SweepPlanTab(notebook, driver_registry)
     results_tab = ResultsViewerTab(notebook)
-    
 
     notebook.add(device_tab,  text="  Device Manager  ")
     notebook.add(power_tab,   text="  Power Supplies  ")
@@ -95,6 +94,10 @@ def main():
     # Push aliases immediately so dropdown is populated on first load
     sweep_tab.set_aliases(aliases)
 
+    # Wire ramp and results refs to sweep plan
+    sweep_tab.set_ramp_tab_ref(ramp_tab)
+    sweep_tab.set_results_tab_ref(results_tab)
+
     def on_drivers_updated(registry: dict):
         driver_registry.update(registry)
         power_tab.set_driver_registry(driver_registry)
@@ -104,7 +107,6 @@ def main():
         dmm_tab.set_driver_registry(driver_registry)
         sweep_tab.set_driver_registry(driver_registry)
         sweep_tab.set_results_tab_ref(results_tab)
-
 
         # Re-push aliases with live connection status after connecting
         sweep_tab.set_aliases(device_tab._alias_map)
