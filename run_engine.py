@@ -33,9 +33,9 @@ class RunEngine:
     def stop(self):
         self._stop_event.set()
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  THREAD ENTRY
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _run(self, plan_rows: list, output_path: str):
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -62,9 +62,9 @@ class RunEngine:
         if self._on_complete:
             self._on_complete()
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  STEP EXECUTOR  (recursive for LOOP)
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _execute_steps(self, plan_rows: list, results: list, path_prefix: str = ""):
         i = 0
         while i < len(plan_rows):
@@ -83,7 +83,7 @@ class RunEngine:
                 # Try nested children first (future nested UI)
                 children = row.get("children", [])
 
-                # Fallback: flat plan — collect all steps after this LOOP marker
+                # Fallback: flat plan -- collect all steps after this LOOP marker
                 if not children:
                     j = i + 1
                     while j < len(plan_rows):
@@ -107,7 +107,6 @@ class RunEngine:
                 self._notify_step(iid, "done")
                 i = skip_to
                 continue
-
 
             if cmd == "GROUP":
                 children = row.get("children", [])
@@ -136,10 +135,9 @@ class RunEngine:
 
             i += 1
 
-
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  COMMAND DISPATCHER
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _dispatch(self, cmd: str, params: dict):
         handlers = {
             "SET_BIAS":     self._cmd_set_bias,
@@ -159,12 +157,12 @@ class RunEngine:
         handler = handlers.get(cmd)
         if handler:
             return handler(params)
-        _logger.warning(f"Unknown command '{cmd}' — skipping.")
+        _logger.warning(f"Unknown command '{cmd}' -- skipping.")
         return None
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  INSTRUMENT RESOLVERS
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _get_sa(self):
         SA_KEYS = ("N9030", "PXA", "MXA", "EXA", "SpectrumAnalyzer", "SA")
         for key in self._registry:
@@ -189,9 +187,9 @@ class RunEngine:
         m = re.search(r"CH(\d+)", channel_str)
         return int(m.group(1)) if m else 1
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  BIASING HANDLERS
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _cmd_set_bias(self, p: dict):
         channel = p.get("channel", "")
         mode    = p.get("mode", "CV")
@@ -252,9 +250,9 @@ class RunEngine:
         _logger.info(f"OUTPUT_OFF  ch={channel}")
         return None
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  MEASUREMENT HANDLERS
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _cmd_power_sweep(self, p: dict):
         start_dbm     = float(p.get("start_dbm",    -20.0))
         stop_dbm      = float(p.get("stop_dbm",      10.0))
@@ -334,13 +332,12 @@ class RunEngine:
 
         return sweep_results
 
-
     def _cmd_measure(self, p: dict):
         notes = p.get("notes", "")
         sa    = self._get_sa()
 
         if sa is None:
-            _logger.warning("MEASURE: no SA in registry — logging note only.")
+            _logger.warning("MEASURE: no SA in registry -- logging note only.")
             return {
                 "command":   "MEASURE",
                 "notes":     notes,
@@ -366,9 +363,9 @@ class RunEngine:
         _logger.info(f"SAVE_RESULTS  filename={p.get('filename', '(auto)')}")
         return None
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  FLOW HANDLERS
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _cmd_wait(self, p: dict):
         seconds = float(p.get("seconds", 1.0))
         _logger.info(f"WAIT  {seconds} s")
@@ -404,7 +401,7 @@ class RunEngine:
         drv = self._resolve_channel(channel)
         if drv is None:
             _logger.warning(
-                f"COND_ABORT: no driver for {channel!r} — skipping check")
+                f"COND_ABORT: no driver for {channel!r} -- skipping check")
             return None
 
         ch_num     = self._channel_number(channel)
@@ -429,9 +426,9 @@ class RunEngine:
             f"(limit {condition} {threshold_ma} mA)")
         return None
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  SCPI HANDLERS
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     def _cmd_scpi_command(self, p: dict):
         inst_name = p.get("instrument", "")
         command   = p.get("command",    "")
@@ -440,7 +437,7 @@ class RunEngine:
             raise _AbortRun(
                 f"SCPI_COMMAND: instrument not in registry: {inst_name!r}")
         drv.write(command)
-        _logger.info(f"SCPI_COMMAND  {inst_name} ← {command!r}")
+        _logger.info(f"SCPI_COMMAND  {inst_name} <- {command!r}")
         return None
 
     def _cmd_scpi_poll(self, p: dict):
@@ -461,7 +458,7 @@ class RunEngine:
             response = str(drv.query(query)).strip()
             if not expected or response == expected:
                 _logger.info(
-                    f"SCPI_POLL ✓  {inst_name}  "
+                    f"SCPI_POLL ok  {inst_name}  "
                     f"{query!r} -> {response!r}")
                 return None
             _logger.debug(
@@ -472,10 +469,10 @@ class RunEngine:
             f"SCPI_POLL timeout ({timeout_s} s): "
             f"{inst_name} query={query!r} expected={expected!r}")
 
-    # ══════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════
     #  HELPERS
-    # ══════════════════════════════════════════════════════════
-    def _notify_step(self, idx: int, status: str):
+    # ════════════════════════════════════════════════════════
+    def _notify_step(self, idx: str, status: str):
         if self._on_step:
             try:
                 self._on_step(idx, status)
