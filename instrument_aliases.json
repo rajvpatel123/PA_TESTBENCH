@@ -1,0 +1,8 @@
+{
+  "Keysight_E36234A": "PS4",
+  "Agilent_E3648A_GPIB15": "PS3",
+  "Agilent_E3648A_GPIB11": "PS2",
+  "Agilent_3648A": "PS1",
+  "RS_SMBV100B": "Sig gen",
+  "PXA_N9030A": "Spectrum Analyzer"
+}
