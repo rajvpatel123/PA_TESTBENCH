@@ -221,7 +221,7 @@ class SweepPlanTab(ttk.Frame):
 
         ttk.Separator(body, orient="vertical").pack(side="left", fill="y", padx=2)
 
-        self._props_frame = ttk.Frame(body, width=400)
+        self._props_frame = ttk.Frame(body, width=500)
         self._props_frame.pack(side="right", fill="y", padx=(4, 0))
         self._props_frame.pack_propagate(False)
         self._build_props_panel()
@@ -326,8 +326,8 @@ class SweepPlanTab(ttk.Frame):
         self.plan_tree = ttk.Treeview(parent, columns=cols, show="tree headings", height=22)
         self.plan_tree.heading("#0", text="Step")
         self.plan_tree.heading("Summary", text="Summary")
-        self.plan_tree.column("#0", width=280, anchor="w")
-        self.plan_tree.column("Summary", width=360, anchor="w")
+        self.plan_tree.column("#0", width=120, anchor="w")
+        self.plan_tree.column("Summary", width=120, anchor="w")
 
         vsb = ttk.Scrollbar(parent, orient="vertical", command=self.plan_tree.yview)
         self.plan_tree.configure(yscrollcommand=vsb.set)
@@ -338,15 +338,15 @@ class SweepPlanTab(ttk.Frame):
         self.plan_tree.bind("<Double-1>", self._on_plan_double_click)
 
         row_btns = ttk.Frame(parent)
-        row_btns.pack(fill="x", pady=4)
+        row_btns.pack(fill="y", pady=4, anchor="n")
 
-        ttk.Button(row_btns, text="Add Child", command=self._add_child_step).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="⬅ Move Out", command=self._move_step_left).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="➡ Move In", command=self._move_step_right).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="🗑 Delete", command=self._delete_step).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="⬆ Move Up", command=lambda: self._move_step(-1)).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="⬇ Move Down", command=lambda: self._move_step(1)).pack(side="left", padx=3)
-        ttk.Button(row_btns, text="📋 Duplicate", command=self._duplicate_step).pack(side="left", padx=3)
+        ttk.Button(row_btns, text="Add Child", command=self._add_child_step).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="⬅ Move Out", command=self._move_step_left).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="➡ Move In", command=self._move_step_right).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="🗑 Delete", command=self._delete_step).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="⬆ Move Up", command=lambda: self._move_step(-1)).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="⬇ Move Down", command=lambda: self._move_step(1)).pack(fill="x", padx=3, pady=2)
+        ttk.Button(row_btns, text="📋 Duplicate", command=self._duplicate_step).pack(fill="x", padx=3, pady=2)
 
     def _build_props_panel(self):
         ttk.Label(self._props_frame, text="Properties", font=("Segoe UI", 10, "bold")).pack(
