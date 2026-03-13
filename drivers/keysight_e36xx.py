@@ -1,116 +1,200 @@
 # drivers/keysight_e36xx.py
 """
 Driver for Keysight E362xx / E3623x series power supplies.
-Channel selection: INST:NSEL {n}  (numeric index, 1-based)
-NOT INST:SEL OUT{n} — that is the older Agilent E3648A syntax.
 
-The E36234A is a 4-channel supply; pass channels=4 when instantiating.
-The E36233A is a 2-channel supply (default).
+Channel selection uses INST:NSEL {n} (numeric, 1-based).
+Firmware quirks handled:
+  - Write *CLS after connect to flush any pending error queue
+  - Add explicit read terminator and 10 ms inter-query delay
+  - Query SYST:ERR? after each write in debug mode to catch silent failures
+  - OUTP is set per channel via INST:NSEL first
+  - VOLT:PROT and CURR:PROT use colon form (not VOLT:PROT:LEV)
+  - All queries strip trailing whitespace and \r\n
+
+Models:
+  E36233A  — 2 ch
+  E36234A  — 4 ch
 """
+import time
 from utils.visa_manager import get_visa_rm
 from utils.logger import get_logger
 
+INTER_CMD_DELAY = 0.02   # seconds between writes and queries
+DEFAULT_TIMEOUT = 10000  # ms
+
 
 class KeysightE36xxSupply:
-    def __init__(self, visa_address: str, name: str = "", channels: int = 2):
+    def __init__(self, visa_address: str, name: str = "",
+                 channels: int = 2, debug: bool = False):
         self._logger       = get_logger(__name__)
         self._visa_address = visa_address
         self._name         = name or visa_address
         self._inst         = None
-        self._channels     = channels  # E36233A=2, E36234A=4
+        self._channels     = channels
+        self._debug        = debug
 
+    # ── Connection ─────────────────────────────────────────────
     def connect(self):
         rm = get_visa_rm()
-        self._inst         = rm.open_resource(self._visa_address)
-        self._inst.timeout = 5000
-        try:
-            self._inst.write("*RST")
-            idn = self._inst.query("*IDN?").strip()
-        except Exception:
-            idn = "IDN failed"
+        inst = rm.open_resource(self._visa_address)
+        inst.timeout              = DEFAULT_TIMEOUT
+        inst.read_termination     = "\n"
+        inst.write_termination    = "\n"
+        inst.send_end             = True
+        self._inst = inst
+
+        # Flush error queue and reset comms state
+        self._write_raw("*CLS")
+        self._write_raw("*RST")
+        time.sleep(0.3)   # let RST settle
+
+        idn = self._query_raw("*IDN?") or "IDN failed"
         self._logger.info(
             f"Connected Keysight E36xx '{self._name}' "
-            f"at {self._visa_address} ({self._channels}ch): {idn}")
+            f"@ {self._visa_address} ({self._channels}ch): {idn}")
 
     def close(self):
         if self._inst is None:
             return
         try:
             for ch in range(1, self._channels + 1):
-                self.output_on(ch, False)
+                try:
+                    self.output_on(ch, False)
+                except Exception:
+                    pass
             self._inst.close()
-            self._logger.info(
-                f"Disconnected Keysight E36xx '{self._name}'")
+            self._logger.info(f"Disconnected Keysight E36xx '{self._name}'")
         finally:
             self._inst = None
 
+    # ── Identification ─────────────────────────────────────────
     def idn(self) -> str:
         if self._inst is None:
             return "Not connected"
-        try:
-            return self._inst.query("*IDN?").strip()
-        except Exception:
-            return "IDN query failed"
+        return self._query_raw("*IDN?") or "IDN query failed"
 
+    # ── Channel selection ──────────────────────────────────────
     def _select_channel(self, channel: int):
         """
-        Select output channel using INST:NSEL (numeric).
-        Keysight E362xx requires this — INST:SEL OUT{n} does NOT work.
+        Select output channel by numeric index.
+        INST:NSEL is the correct form for E362xx (not INST:SEL OUT{n}).
         """
         self._check(channel)
-        self._inst.write(f"INST:NSEL {channel}")
+        self._write_raw(f"INST:NSEL {channel}")
 
+    # ── Set methods ────────────────────────────────────────────
     def set_voltage(self, channel: int, volts: float):
-        self._check(channel)
         self._select_channel(channel)
-        self._inst.write(f"VOLT {volts}")
-        self._logger.info(
-            f"{self._name} CH{channel} voltage set to {volts} V")
+        self._write_raw(f"VOLT {volts:.6f}")
+        if self._debug:
+            self._check_error(f"set_voltage CH{channel}")
+        self._logger.info(f"{self._name} CH{channel} VOLT → {volts} V")
 
     def set_current(self, channel: int, amps: float):
-        self._check(channel)
         self._select_channel(channel)
-        self._inst.write(f"CURR {amps}")
-        self._logger.info(
-            f"{self._name} CH{channel} current set to {amps} A")
+        self._write_raw(f"CURR {amps:.6f}")
+        if self._debug:
+            self._check_error(f"set_current CH{channel}")
+        self._logger.info(f"{self._name} CH{channel} CURR → {amps} A")
 
     def set_ovp(self, channel: int, volts: float):
-        """Set Over-Voltage Protection limit."""
-        self._check(channel)
+        """Over-Voltage Protection limit."""
         self._select_channel(channel)
-        self._inst.write(f"VOLT:PROT {volts}")
-        self._logger.info(
-            f"{self._name} CH{channel} OVP set to {volts} V")
+        self._write_raw(f"VOLT:PROT {volts:.6f}")
+        if self._debug:
+            self._check_error(f"set_ovp CH{channel}")
+        self._logger.info(f"{self._name} CH{channel} OVP → {volts} V")
 
     def set_ocp(self, channel: int, amps: float):
-        """Set Over-Current Protection limit."""
-        self._check(channel)
+        """Over-Current Protection limit."""
         self._select_channel(channel)
-        self._inst.write(f"CURR:PROT {amps}")
-        self._logger.info(
-            f"{self._name} CH{channel} OCP set to {amps} A")
+        self._write_raw(f"CURR:PROT {amps:.6f}")
+        if self._debug:
+            self._check_error(f"set_ocp CH{channel}")
+        self._logger.info(f"{self._name} CH{channel} OCP → {amps} A")
 
     def output_on(self, channel: int, enable: bool):
-        self._check(channel)
         self._select_channel(channel)
         state = "ON" if enable else "OFF"
-        self._inst.write(f"OUTP {state}")
-        self._logger.info(
-            f"{self._name} CH{channel} output {state}")
+        self._write_raw(f"OUTP {state}")
+        if self._debug:
+            self._check_error(f"output_on CH{channel} {state}")
+        self._logger.info(f"{self._name} CH{channel} OUTPUT {state}")
 
+    # ── Measure methods ────────────────────────────────────────
     def measure_voltage(self, channel: int) -> float:
-        self._check(channel)
         self._select_channel(channel)
-        return float(self._inst.query("MEAS:VOLT?").strip())
+        raw = self._query_raw("MEAS:VOLT?")
+        return self._parse_float(raw, f"measure_voltage CH{channel}")
 
     def measure_current(self, channel: int) -> float:
-        self._check(channel)
         self._select_channel(channel)
-        return float(self._inst.query("MEAS:CURR?").strip())
+        raw = self._query_raw("MEAS:CURR?")
+        return self._parse_float(raw, f"measure_current CH{channel}")
+
+    def measure_all(self, channel: int) -> dict:
+        """Return {'volt': float, 'curr': float} in one method call."""
+        return {
+            "volt": self.measure_voltage(channel),
+            "curr": self.measure_current(channel),
+        }
+
+    # ── Error / status helpers ─────────────────────────────────
+    def check_errors(self) -> list[str]:
+        """Drain the SCPI error queue; return list of non-zero error strings."""
+        errors = []
+        if self._inst is None:
+            return errors
+        for _ in range(20):   # max 20 errors in queue
+            resp = self._query_raw("SYST:ERR?")
+            if resp is None or resp.startswith("+0") or resp.startswith("0,"):
+                break
+            errors.append(resp)
+            self._logger.warning(f"{self._name} SCPI error: {resp}")
+        return errors
+
+    def _check_error(self, context: str):
+        errs = self.check_errors()
+        if errs:
+            self._logger.error(
+                f"{self._name} [{context}] SCPI errors: {errs}")
+
+    # ── Low-level VISA helpers ─────────────────────────────────
+    def _write_raw(self, cmd: str):
+        """Write with inter-command delay."""
+        self._ensure_connected()
+        self._inst.write(cmd)
+        time.sleep(INTER_CMD_DELAY)
+
+    def _query_raw(self, cmd: str) -> str | None:
+        """Query with inter-command delay; returns stripped string or None."""
+        self._ensure_connected()
+        try:
+            resp = self._inst.query(cmd)
+            time.sleep(INTER_CMD_DELAY)
+            return resp.strip()
+        except Exception as e:
+            self._logger.error(
+                f"{self._name} query '{cmd}' failed: {e}")
+            return None
+
+    def _parse_float(self, raw: str | None, context: str) -> float:
+        if raw is None:
+            raise RuntimeError(
+                f"{self._name} [{context}]: no response from instrument")
+        try:
+            return float(raw)
+        except ValueError:
+            raise RuntimeError(
+                f"{self._name} [{context}]: cannot parse '{raw}' as float")
+
+    def _ensure_connected(self):
+        if self._inst is None:
+            raise RuntimeError(
+                f"{self._name} is not connected. Call connect() first.")
 
     def _check(self, channel: int):
+        self._ensure_connected()
         if not 1 <= channel <= self._channels:
             raise ValueError(
-                f"Channel must be 1..{self._channels}, got {channel}")
-        if self._inst is None:
-            raise RuntimeError(f"{self._name} not connected")
+                f"{self._name}: channel must be 1–{self._channels}, got {channel}")
