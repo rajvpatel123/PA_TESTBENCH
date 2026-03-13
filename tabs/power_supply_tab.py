@@ -7,8 +7,13 @@ from utils.live_poll_manager import LivePollManager
 
 _logger = get_logger(__name__)
 
+# channels= must match actual hardware:
+#   Keysight E36234A  -> 4 channels
+#   Keysight E36233A  -> 2 channels
+#   Agilent E3648A    -> 2 channels
+#   HP 6633B          -> 1 channel
 POWER_SUPPLIES = [
-    {"name": "Keysight_E36234A", "channels": 2},
+    {"name": "Keysight_E36234A", "channels": 4},
     {"name": "Keysight_E36233A", "channels": 2},
     {"name": "Agilent_E3648A_GPIB15", "channels": 2},
     {"name": "Agilent_E3648A_GPIB11", "channels": 2},
@@ -353,9 +358,9 @@ class PowerSupplyTab(ttk.Frame):
                 ttk.Label(parent, text=hint, foreground="gray").grid(row=row, column=2, padx=4, sticky="w")
 
         idq_row(idq_frame, "Target Idq (mA):", info["target_idq_ma"], 0, "Leave blank to skip")
-        idq_row(idq_frame, "Tolerance ± (mA):", info["idq_tolerance_ma"], 1, "Default: 5 mA")
+        idq_row(idq_frame, "Tolerance \u00b1 (mA):", info["idq_tolerance_ma"], 1, "Default: 5 mA")
         idq_row(idq_frame, "Gate Step Size (mV):", info["idq_step_mv"], 2, "Default: 50 mV")
-        idq_row(idq_frame, "Hard Abort > (mA):", info["max_idq_ma"], 3, "Leave blank = 3× target")
+        idq_row(idq_frame, "Hard Abort > (mA):", info["max_idq_ma"], 3, "Leave blank = 3\u00d7 target")
 
         ttk.Label(
             idq_frame,
@@ -576,10 +581,8 @@ class PowerSupplyTab(ttk.Frame):
             return
 
         try:
-            if enable:
-                drv.output_on(info["channel"])
-            else:
-                drv.output_off(info["channel"])
+            # Fix: pass enable bool explicitly — driver signature is output_on(channel, enable)
+            drv.output_on(info["channel"], enable)
 
             state = "ON" if enable else "OFF"
             vals = list(self.tree.item(ch_id, "values"))

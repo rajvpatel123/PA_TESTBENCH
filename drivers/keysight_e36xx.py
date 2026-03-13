@@ -1,20 +1,23 @@
-# drivers/keysight_e36xx.py - COMPLETE FILE
+# drivers/keysight_e36xx.py
 """
-Driver for Keysight E362xx dual-output power supplies.
-Channel selection: INST:NSEL {n}  (numeric index, 1 or 2)
+Driver for Keysight E362xx / E3623x series power supplies.
+Channel selection: INST:NSEL {n}  (numeric index, 1-based)
 NOT INST:SEL OUT{n} — that is the older Agilent E3648A syntax.
+
+The E36234A is a 4-channel supply; pass channels=4 when instantiating.
+The E36233A is a 2-channel supply (default).
 """
 from utils.visa_manager import get_visa_rm
 from utils.logger import get_logger
 
 
 class KeysightE36xxSupply:
-    def __init__(self, visa_address: str, name: str = ""):
+    def __init__(self, visa_address: str, name: str = "", channels: int = 2):
         self._logger       = get_logger(__name__)
         self._visa_address = visa_address
         self._name         = name or visa_address
         self._inst         = None
-        self._channels     = 2
+        self._channels     = channels  # E36233A=2, E36234A=4
 
     def connect(self):
         rm = get_visa_rm()
@@ -27,7 +30,7 @@ class KeysightE36xxSupply:
             idn = "IDN failed"
         self._logger.info(
             f"Connected Keysight E36xx '{self._name}' "
-            f"at {self._visa_address}: {idn}")
+            f"at {self._visa_address} ({self._channels}ch): {idn}")
 
     def close(self):
         if self._inst is None:
