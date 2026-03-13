@@ -253,7 +253,7 @@ class RunEngine:
         drv = self._resolve_channel(channel)
         if drv is None:
             raise _AbortRun(f"No driver for OUTPUT_ON: {channel!r}")
-        drv.output_on(self._channel_number(channel))
+        drv.output_on(self._channel_number(channel), True)
         _logger.info(f"OUTPUT_ON  ch={channel}")
         return None
 
@@ -262,7 +262,7 @@ class RunEngine:
         drv = self._resolve_channel(channel)
         if drv is None:
             raise _AbortRun(f"No driver for OUTPUT_OFF: {channel!r}")
-        drv.output_off(self._channel_number(channel))
+        drv.output_on(self._channel_number(channel), False)
         _logger.info(f"OUTPUT_OFF  ch={channel}")
         return None
 
