@@ -40,12 +40,14 @@ UI_REFRESH_MS        = 250
 class PowerSupplyTab(ttk.Frame):
     def __init__(self, parent, driver_registry: dict):
         super().__init__(parent)
-        self._registry    = driver_registry
-        self._channels    = {}          # ch_id -> channel state dict
-        self._active_rows = []          # ordered list of ch_ids the user has added
-        self._row_checked = {}          # ch_id -> tk.BooleanVar
-        self._alias_map   = self._load_aliases()
-        self._inline_widget = None      # currently open inline editor widget
+        self._registry      = driver_registry
+        self._channels      = {}   # ch_id -> channel state dict
+        self._active_rows   = []   # ordered list of ch_ids the user has added
+        self._row_checked   = {}   # ch_id -> tk.BooleanVar
+        self._output_state  = {}   # ch_id -> bool  (True = ON)
+        self._output_btns   = {}   # ch_id -> tk.Button overlay
+        self._alias_map     = self._load_aliases()
+        self._inline_widget = None
 
         self._ui_refresh_job = None
         self._poll_manager = LivePollManager(
@@ -121,7 +123,7 @@ class PowerSupplyTab(ttk.Frame):
             font=("Segoe UI", 14, "bold"),
         ).pack(pady=10)
 
-        # ── Top bar: Add only ────────────────────────────────────
+        # ── Top bar ──────────────────────────────────────────
         top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=(0, 4))
         ttk.Button(top, text="+ Add Supply", command=self._open_add_dialog).pack(side="left", padx=(0, 4))
@@ -155,49 +157,42 @@ class PowerSupplyTab(ttk.Frame):
         for col, w in {
             "☑": 34, "Channel": 260, "Role": 75, "Mode": 55,
             "Set V": 80, "Set A": 80, "Prot Limit": 110,
-            "Meas V": 90, "Meas A": 90, "Output": 65,
+            "Meas V": 90, "Meas A": 90, "Output": 70,
         }.items():
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="center")
         self.tree.pack(fill="both", expand=True, padx=5, pady=5)
-        self.tree.bind("<Button-1>",   self._on_click)
-        self.tree.bind("<Double-1>",   self._on_double_click)
+        self.tree.bind("<Button-1>",  self._on_click)
+        self.tree.bind("<Double-1>",  self._on_double_click)
+        self.tree.bind("<Configure>", lambda e: self._reposition_output_btns())
 
         # ── Bottom bar ────────────────────────────────────────
         bot = ttk.Frame(active_frame)
         bot.pack(fill="x", padx=5, pady=(0, 4))
 
-        # Row management
         ttk.Button(bot, text="Edit Selected",   command=self._edit_selected).pack(side="left", padx=(0, 4))
         ttk.Button(bot, text="Remove Selected", command=self._remove_selected).pack(side="left", padx=4)
         ttk.Button(bot, text="Read Once",       command=self._read_once).pack(side="left", padx=4)
 
         ttk.Separator(bot, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
 
-        # Hardware group actions
         ttk.Button(bot, text="Set Checked", command=self._set_checked_rows).pack(side="left", padx=4)
 
         tk.Button(
-            bot, text="  ON  ",
+            bot, text="  ON (all checked)  ",
             bg="#1a7a1a", fg="white",
             activebackground="#145a14", activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             command=lambda: self._output_checked(True),
         ).pack(side="left", padx=4)
 
         tk.Button(
-            bot, text="  OFF  ",
+            bot, text="  OFF (all checked)  ",
             bg="#8b0000", fg="white",
             activebackground="#5a0000", activeforeground="white",
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 9, "bold"),
             command=lambda: self._output_checked(False),
         ).pack(side="left", padx=4)
-
-        ttk.Label(
-            bot,
-            text="Set = send to hardware  |  ON/OFF = toggle output",
-            foreground="gray",
-        ).pack(side="left", padx=10)
 
         # ── Readback controls ───────────────────────────────
         rb = ttk.Frame(active_frame)
@@ -255,7 +250,7 @@ class PowerSupplyTab(ttk.Frame):
     def _open_add_dialog(self):
         sel = self.avail_tree.selection()
         if not sel:
-            messagebox.showwarning("No Selection", "Select a supply from the Available Power Supplies list first.")
+            messagebox.showwarning("No Selection", "Select a supply from the Available list first.")
             return
 
         supply_name = sel[0]
@@ -304,7 +299,8 @@ class PowerSupplyTab(ttk.Frame):
             return
         if ch_id not in self._active_rows:
             self._active_rows.append(ch_id)
-            self._row_checked[ch_id] = tk.BooleanVar(value=True)
+            self._row_checked[ch_id]  = tk.BooleanVar(value=True)
+            self._output_state[ch_id] = False
         self._refresh_active_tree()
 
     def _remove_selected(self):
@@ -317,9 +313,15 @@ class PowerSupplyTab(ttk.Frame):
         if ch_id in self._active_rows:
             self._active_rows.remove(ch_id)
         self._row_checked.pop(ch_id, None)
+        self._output_state.pop(ch_id, None)
+        self._destroy_output_btn(ch_id)
         self._refresh_active_tree()
 
     def _refresh_active_tree(self):
+        # Destroy all overlay buttons before rebuilding rows
+        for ch_id in list(self._output_btns):
+            self._destroy_output_btn(ch_id)
+
         self.tree.delete(*self.tree.get_children())
         for ch_id in self._active_rows:
             info    = self._channels[ch_id]
@@ -334,13 +336,83 @@ class PowerSupplyTab(ttk.Frame):
                 set_a = info["curr_var"].get()
                 prot  = f"OVP {info['ovp_var'].get()} V" if info["ovp_var"].get() else ""
 
+            # Output column text is blank — the overlay button covers it
             self.tree.insert("", "end", iid=ch_id, values=(
                 checked, info["label"], info["role"], info["mode"],
-                set_v, set_a, prot, "---", "---", "OFF",
+                set_v, set_a, prot, "---", "---", "",
             ))
 
+        # Rebuild overlay buttons after a short delay so bbox is valid
+        self.tree.after(30, self._reposition_output_btns)
+
+    # ── Per-row output toggle buttons (overlaid on Output column) ──
+    def _get_output_col_id(self) -> str:
+        """Return the Treeview column identifier for the Output column."""
+        cols = self.tree["columns"]
+        return f"#{cols.index('Output') + 1}"
+
+    def _reposition_output_btns(self):
+        """Create or reposition one overlay button per active row."""
+        col_id = self._get_output_col_id()
+        for ch_id in self._active_rows:
+            bbox = self.tree.bbox(ch_id, col_id)
+            if not bbox:
+                # Row scrolled out of view — hide the button
+                btn = self._output_btns.get(ch_id)
+                if btn:
+                    btn.place_forget()
+                continue
+
+            x, y, w, h = bbox
+            is_on = self._output_state.get(ch_id, False)
+
+            if ch_id not in self._output_btns:
+                # Create fresh button
+                btn = tk.Button(
+                    self.tree,
+                    font=("Segoe UI", 8, "bold"),
+                    relief="flat",
+                    bd=0,
+                    cursor="hand2",
+                )
+                self._output_btns[ch_id] = btn
+            else:
+                btn = self._output_btns[ch_id]
+
+            # Update appearance based on current state
+            if is_on:
+                btn.config(
+                    text="ON",
+                    bg="#1a7a1a", fg="white",
+                    activebackground="#145a14", activeforeground="white",
+                    command=lambda cid=ch_id: self._toggle_output_btn(cid),
+                )
+            else:
+                btn.config(
+                    text="OFF",
+                    bg="#555555", fg="white",
+                    activebackground="#333333", activeforeground="white",
+                    command=lambda cid=ch_id: self._toggle_output_btn(cid),
+                )
+
+            btn.place(x=x + 2, y=y + 1, width=w - 4, height=h - 2)
+
+    def _toggle_output_btn(self, ch_id: str):
+        """Toggle the output for a single row and update its button."""
+        current = self._output_state.get(ch_id, False)
+        new_state = not current
+        self._channel_output(ch_id, new_state)
+        # _channel_output updates _output_state and repositions button
+
+    def _destroy_output_btn(self, ch_id: str):
+        btn = self._output_btns.pop(ch_id, None)
+        if btn:
+            try:
+                btn.destroy()
+            except Exception:
+                pass
+
     # ── Inline cell editing ────────────────────────────────────
-    # Editable columns and their type
     _INLINE_COLS = {
         _COL_ROLE:  "combo",
         _COL_MODE:  "combo",
@@ -354,19 +426,17 @@ class PowerSupplyTab(ttk.Frame):
     }
 
     def _on_click(self, event):
-        region = self.tree.identify_region(event.x, event.y)
-        col_id = self.tree.identify_column(event.x)          # "#1", "#2", ...
-        ch_id  = self.tree.identify_row(event.y)
+        region  = self.tree.identify_region(event.x, event.y)
+        col_id  = self.tree.identify_column(event.x)
+        ch_id   = self.tree.identify_row(event.y)
 
-        # Always dismiss any open inline widget first
         self._dismiss_inline(commit=True)
 
         if region != "cell" or not ch_id:
             return
 
-        col_idx = int(col_id.lstrip("#")) - 1               # 0-based
+        col_idx = int(col_id.lstrip("#")) - 1
 
-        # Checkbox column — toggle and return
         if col_idx == _COL_CHECK:
             if ch_id in self._row_checked:
                 var = self._row_checked[ch_id]
@@ -374,12 +444,10 @@ class PowerSupplyTab(ttk.Frame):
                 self._refresh_active_tree()
             return
 
-        # Read-only columns: Channel, Meas V, Meas A, Output
         if col_idx not in self._INLINE_COLS:
             return
 
-        edit_type = self._INLINE_COLS[col_idx]
-        self._open_inline(ch_id, col_idx, col_id, edit_type)
+        self._open_inline(ch_id, col_idx, col_id, self._INLINE_COLS[col_idx])
 
     def _on_double_click(self, event):
         col_idx = int(self.tree.identify_column(event.x).lstrip("#")) - 1
@@ -390,29 +458,20 @@ class PowerSupplyTab(ttk.Frame):
             self._dismiss_inline(commit=False)
             self._open_edit_dialog(sel[0])
 
-    def _open_inline(self, ch_id: str, col_idx: int, col_id: str, edit_type: str):
-        """Place a floating Entry or Combobox directly over the clicked cell."""
+    def _open_inline(self, ch_id, col_idx, col_id, edit_type):
         bbox = self.tree.bbox(ch_id, col_id)
         if not bbox:
             return
         x, y, w, h = bbox
         info = self._channels[ch_id]
 
-        # Determine current value to pre-fill
-        if col_idx == _COL_ROLE:
-            cur_val = info["role"]
-        elif col_idx == _COL_MODE:
-            cur_val = info["mode"]
-        elif col_idx == _COL_SET_V:
-            cur_val = info["volt_var"].get()
-        elif col_idx == _COL_SET_A:
-            cur_val = info["curr_var"].get()
+        if col_idx == _COL_ROLE:  cur_val = info["role"]
+        elif col_idx == _COL_MODE:  cur_val = info["mode"]
+        elif col_idx == _COL_SET_V: cur_val = info["volt_var"].get()
+        elif col_idx == _COL_SET_A: cur_val = info["curr_var"].get()
         elif col_idx == _COL_PROT:
-            # Prot Limit is displayed as "OCP x A" / "OVP x V" — extract raw number
-            raw = info["ocp_var"].get() if info["mode"] == "CV" else info["ovp_var"].get()
-            cur_val = raw
-        else:
-            cur_val = ""
+            cur_val = info["ocp_var"].get() if info["mode"] == "CV" else info["ovp_var"].get()
+        else: cur_val = ""
 
         var = tk.StringVar(value=cur_val)
 
@@ -438,51 +497,35 @@ class PowerSupplyTab(ttk.Frame):
         def _cancel(e=None):
             self._dismiss_inline(commit=False)
 
-        widget.bind("<Return>",    _commit)
-        widget.bind("<Tab>",       _commit)
-        widget.bind("<Escape>",    _cancel)
-        widget.bind("<FocusOut>",  _commit)
+        widget.bind("<Return>",   _commit)
+        widget.bind("<Tab>",      _commit)
+        widget.bind("<Escape>",   _cancel)
+        widget.bind("<FocusOut>", _commit)
         if edit_type == "combo":
             widget.bind("<<ComboboxSelected>>", _commit)
 
         self._inline_widget = widget
 
-    def _apply_inline(self, ch_id: str, col_idx: int, value: str):
-        """Write the edited value back to the channel state dict."""
+    def _apply_inline(self, ch_id, col_idx, value):
         info  = self._channels[ch_id]
         value = value.strip()
-
-        if col_idx == _COL_ROLE:
-            info["role"] = value
-
+        if col_idx == _COL_ROLE:  info["role"] = value
         elif col_idx == _COL_MODE:
-            if value in ("CV", "CC"):
-                info["mode"] = value
-
-        elif col_idx == _COL_SET_V:
-            info["volt_var"].set(value)
-
-        elif col_idx == _COL_SET_A:
-            info["curr_var"].set(value)
-
+            if value in ("CV", "CC"): info["mode"] = value
+        elif col_idx == _COL_SET_V: info["volt_var"].set(value)
+        elif col_idx == _COL_SET_A: info["curr_var"].set(value)
         elif col_idx == _COL_PROT:
-            # Write to correct protection var based on current mode
-            if info["mode"] == "CV":
-                info["ocp_var"].set(value)
-            else:
-                info["ovp_var"].set(value)
-
+            if info["mode"] == "CV": info["ocp_var"].set(value)
+            else:                    info["ovp_var"].set(value)
         self._update_tree_row(ch_id)
 
-    def _dismiss_inline(self, commit: bool = False):
+    def _dismiss_inline(self, commit=False):
         if self._inline_widget is not None:
-            try:
-                self._inline_widget.destroy()
-            except Exception:
-                pass
+            try: self._inline_widget.destroy()
+            except Exception: pass
             self._inline_widget = None
 
-    # ── Full edit dialog (double-click or Edit Selected button) ────
+    # ── Full edit dialog ─────────────────────────────────────────
     def _edit_selected(self):
         sel = self.tree.selection()
         if not sel:
@@ -491,7 +534,7 @@ class PowerSupplyTab(ttk.Frame):
         self._dismiss_inline(commit=False)
         self._open_edit_dialog(sel[0])
 
-    def _open_edit_dialog(self, ch_id: str):
+    def _open_edit_dialog(self, ch_id):
         info   = self._channels[ch_id]
         dialog = tk.Toplevel(self)
         dialog.title(f"Configure: {info['label']}")
@@ -504,44 +547,27 @@ class PowerSupplyTab(ttk.Frame):
         role_var = tk.StringVar(value=info["role"])
         mode_var = tk.StringVar(value=info["mode"])
 
-        # Role
         role_frame = ttk.LabelFrame(dialog, text="Role")
         role_frame.grid(row=1, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
         ttk.Label(role_frame, text="Role:", width=14, anchor="e").grid(row=0, column=0, padx=8, pady=6, sticky="e")
-        ttk.Combobox(
-            role_frame, textvariable=role_var,
-            values=["None", "Gate", "Drain"],
-            state="readonly", width=14,
-        ).grid(row=0, column=1, padx=8, pady=6, sticky="w")
+        ttk.Combobox(role_frame, textvariable=role_var, values=["None", "Gate", "Drain"],
+                     state="readonly", width=14).grid(row=0, column=1, padx=8, pady=6, sticky="w")
 
-        # Mode
         mode_frame = ttk.LabelFrame(dialog, text="Output Mode")
         mode_frame.grid(row=2, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
-        ttk.Radiobutton(
-            mode_frame, text="CV — Constant Voltage",
-            variable=mode_var, value="CV",
-            command=lambda: _refresh_val_rows(),
-        ).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
-        ttk.Label(
-            mode_frame,
-            text="You set: Voltage (V)  +  OCP Limit (A)\nSupply holds the voltage. Trips off if current exceeds OCP.",
-            foreground="gray", justify="left",
-        ).grid(row=1, column=0, padx=28, pady=(0, 6), sticky="w")
-        ttk.Radiobutton(
-            mode_frame, text="CC — Constant Current",
-            variable=mode_var, value="CC",
-            command=lambda: _refresh_val_rows(),
-        ).grid(row=2, column=0, padx=12, pady=(4, 2), sticky="w")
-        ttk.Label(
-            mode_frame,
-            text="You set: Current (A)  +  OVP Limit (V)\nSupply holds the current. Trips off if voltage exceeds OVP.",
-            foreground="gray", justify="left",
-        ).grid(row=3, column=0, padx=28, pady=(0, 8), sticky="w")
+        ttk.Radiobutton(mode_frame, text="CV — Constant Voltage", variable=mode_var, value="CV",
+                        command=lambda: _refresh_val_rows()).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
+        ttk.Label(mode_frame,
+                  text="You set: Voltage (V)  +  OCP Limit (A)\nSupply holds the voltage. Trips off if current exceeds OCP.",
+                  foreground="gray", justify="left").grid(row=1, column=0, padx=28, pady=(0, 6), sticky="w")
+        ttk.Radiobutton(mode_frame, text="CC — Constant Current", variable=mode_var, value="CC",
+                        command=lambda: _refresh_val_rows()).grid(row=2, column=0, padx=12, pady=(4, 2), sticky="w")
+        ttk.Label(mode_frame,
+                  text="You set: Current (A)  +  OVP Limit (V)\nSupply holds the current. Trips off if voltage exceeds OVP.",
+                  foreground="gray", justify="left").grid(row=3, column=0, padx=28, pady=(0, 8), sticky="w")
 
-        # Values
         vals_frame = ttk.LabelFrame(dialog, text="Values")
         vals_frame.grid(row=3, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
-
         lbl_volt  = ttk.Label(vals_frame, text="Set Voltage (V):", width=20, anchor="e")
         ent_volt  = ttk.Entry(vals_frame, textvariable=info["volt_var"], width=14)
         lbl_ocp   = ttk.Label(vals_frame, text="OCP Limit (A):",   width=20, anchor="e")
@@ -550,11 +576,9 @@ class PowerSupplyTab(ttk.Frame):
         ent_curr  = ttk.Entry(vals_frame, textvariable=info["curr_var"], width=14)
         lbl_ovp   = ttk.Label(vals_frame, text="OVP Limit (V):",   width=20, anchor="e")
         ent_ovp   = ttk.Entry(vals_frame, textvariable=info["ovp_var"],  width=14)
-        gate_warn = ttk.Label(
-            vals_frame,
-            text="Gate voltage must be negative for GaN (e.g. -3.0 V)",
-            foreground="orange",
-        )
+        gate_warn = ttk.Label(vals_frame,
+                              text="Gate voltage must be negative for GaN (e.g. -3.0 V)",
+                              foreground="orange")
 
         def _refresh_val_rows():
             for w in (lbl_volt, ent_volt, lbl_ocp, ent_ocp,
@@ -571,10 +595,8 @@ class PowerSupplyTab(ttk.Frame):
                 ent_curr.grid(row=0, column=1, padx=8, pady=5, sticky="w")
                 lbl_ovp.grid( row=1, column=0, padx=8, pady=5, sticky="e")
                 ent_ovp.grid( row=1, column=1, padx=8, pady=5, sticky="w")
-
         _refresh_val_rows()
 
-        # Idq targeting
         idq_frame = ttk.LabelFrame(dialog, text="Idq Targeting  (Drain channel only)")
         idq_frame.grid(row=4, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
 
@@ -584,17 +606,14 @@ class PowerSupplyTab(ttk.Frame):
             if hint:
                 ttk.Label(parent, text=hint, foreground="gray").grid(row=row, column=2, padx=4, sticky="w")
 
-        idq_row(idq_frame, "Target Idq (mA):",       info["target_idq_ma"],    0, "Leave blank to skip")
-        idq_row(idq_frame, "Tolerance \u00b1 (mA):",   info["idq_tolerance_ma"], 1, "Default: 5 mA")
-        idq_row(idq_frame, "Gate Step Size (mV):",   info["idq_step_mv"],      2, "Default: 50 mV")
-        idq_row(idq_frame, "Hard Abort > (mA):",     info["max_idq_ma"],       3, "Leave blank = 3\u00d7 target")
-        ttk.Label(
-            idq_frame,
-            text="Set on the DRAIN channel. The sequencer walks gate voltage\ntoward final gate V while monitoring drain current.",
-            foreground="gray",
-        ).grid(row=4, column=0, columnspan=3, padx=8, pady=(0, 6))
+        idq_row(idq_frame, "Target Idq (mA):",     info["target_idq_ma"],    0, "Leave blank to skip")
+        idq_row(idq_frame, "Tolerance \u00b1 (mA):", info["idq_tolerance_ma"], 1, "Default: 5 mA")
+        idq_row(idq_frame, "Gate Step Size (mV):", info["idq_step_mv"],      2, "Default: 50 mV")
+        idq_row(idq_frame, "Hard Abort > (mA):",   info["max_idq_ma"],       3, "Leave blank = 3\u00d7 target")
+        ttk.Label(idq_frame,
+                  text="Set on the DRAIN channel. The sequencer walks gate voltage\ntoward final gate V while monitoring drain current.",
+                  foreground="gray").grid(row=4, column=0, columnspan=3, padx=8, pady=(0, 6))
 
-        # Buttons
         btn_frame = ttk.Frame(dialog)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=10)
 
@@ -603,24 +622,16 @@ class PowerSupplyTab(ttk.Frame):
             info["mode"] = mode_var.get()
             self._update_tree_row(ch_id)
 
-        def apply():
-            _apply_meta(); dialog.destroy()
-
-        def set_now():
-            _apply_meta(); dialog.destroy()
-            self._set_channel_values(ch_id)
-
-        def set_and_on():
-            _apply_meta(); dialog.destroy()
-            self._set_channel_values(ch_id)
-            self._channel_output(ch_id, True)
-
-        ttk.Button(btn_frame, text="Apply (no hardware)", command=apply).pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Set Values",          command=set_now).pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Set + ON",            command=set_and_on).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Apply (no hardware)",
+                   command=lambda: (_apply_meta(), dialog.destroy())).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Set Values",
+                   command=lambda: (_apply_meta(), dialog.destroy(), self._set_channel_values(ch_id))).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Set + ON",
+                   command=lambda: (_apply_meta(), dialog.destroy(),
+                                    self._set_channel_values(ch_id), self._channel_output(ch_id, True))).pack(side="left", padx=6)
 
     # ── Tree row refresh ─────────────────────────────────────────
-    def _update_tree_row(self, ch_id: str):
+    def _update_tree_row(self, ch_id):
         if not self.tree.exists(ch_id):
             return
         info    = self._channels[ch_id]
@@ -640,10 +651,12 @@ class PowerSupplyTab(ttk.Frame):
         self.tree.item(ch_id, values=(
             checked, info["label"], info["role"], mode,
             set_v, set_a, prot,
-            vals[_COL_MEAS_V], vals[_COL_MEAS_A], vals[_COL_OUTPUT],
+            vals[_COL_MEAS_V], vals[_COL_MEAS_A], "",
         ))
+        # Re-sync button position after row content change
+        self.tree.after(20, self._reposition_output_btns)
 
-    # ── Group actions (checked rows) ───────────────────────────
+    # ── Group actions ───────────────────────────────────────────
     def _set_checked_rows(self):
         did_any = False
         for ch_id in self._active_rows:
@@ -663,13 +676,12 @@ class PowerSupplyTab(ttk.Frame):
             messagebox.showwarning("Nothing Checked", "Check at least one active row first.")
 
     # ── Hardware actions ───────────────────────────────────────
-    def _set_channel_values(self, ch_id: str):
+    def _set_channel_values(self, ch_id):
         info = self._channels[ch_id]
         drv  = self._registry.get(info["supply"])
         if drv is None:
             messagebox.showerror("Not Connected", f"{info['supply']} not in driver registry.")
             return
-
         try:
             if info["mode"] == "CV":
                 volt_str = info["volt_var"].get().strip()
@@ -685,8 +697,7 @@ class PowerSupplyTab(ttk.Frame):
                     ):
                         return
                 drv.set_voltage(info["channel"], volts)
-                if ocp_str:
-                    drv.set_ocp(info["channel"], float(ocp_str))
+                if ocp_str: drv.set_ocp(info["channel"], float(ocp_str))
                 self.status_lbl.config(
                     text=f"Set {info['label']}: {volts} V  | OCP = {ocp_str or 'unchanged'} A",
                     foreground="blue")
@@ -699,38 +710,33 @@ class PowerSupplyTab(ttk.Frame):
                     return
                 amps = float(curr_str)
                 drv.set_current(info["channel"], amps)
-                if ovp_str:
-                    drv.set_ovp(info["channel"], float(ovp_str))
+                if ovp_str: drv.set_ovp(info["channel"], float(ovp_str))
                 self.status_lbl.config(
                     text=f"Set {info['label']}: {amps} A  | OVP = {ovp_str or 'unchanged'} V",
                     foreground="blue")
                 _logger.info(f"Set {ch_id} CC: {amps} A  OVP={ovp_str}")
-
             self._update_tree_row(ch_id)
-
         except ValueError:
             messagebox.showerror("Invalid Input", "Values must be numbers.")
         except Exception as e:
             messagebox.showerror("Hardware Error", str(e))
             _logger.error(f"Set values failed {ch_id}: {e}")
 
-    def _channel_output(self, ch_id: str, enable: bool):
+    def _channel_output(self, ch_id, enable: bool):
         info = self._channels[ch_id]
         drv  = self._registry.get(info["supply"])
         if drv is None:
             messagebox.showerror("Not Connected", f"{info['supply']} not in driver registry.")
             return
-
         try:
             drv.output_on(info["channel"], enable)
-            state = "ON" if enable else "OFF"
-            if self.tree.exists(ch_id):
-                vals              = list(self.tree.item(ch_id, "values"))
-                vals[_COL_OUTPUT] = state
-                self.tree.item(ch_id, values=vals)
+            self._output_state[ch_id] = enable
             color = "green" if enable else "gray"
+            state = "ON" if enable else "OFF"
             self.status_lbl.config(text=f"{info['label']} output {state}", foreground=color)
             _logger.info(f"{ch_id} output {state}")
+            # Update the overlay button appearance immediately
+            self._reposition_output_btns()
         except Exception as e:
             messagebox.showerror("Hardware Error", str(e))
             _logger.error(f"Output toggle failed {ch_id}: {e}")
@@ -760,10 +766,8 @@ class PowerSupplyTab(ttk.Frame):
         self.rb_btn.config(text="Start Live Readback")
         self.status_lbl.config(text="Status: Readback stopped", foreground="gray")
         if self._ui_refresh_job is not None:
-            try:
-                self.after_cancel(self._ui_refresh_job)
-            except Exception:
-                pass
+            try: self.after_cancel(self._ui_refresh_job)
+            except Exception: pass
             self._ui_refresh_job = None
 
     def _read_once(self):
@@ -773,10 +777,8 @@ class PowerSupplyTab(ttk.Frame):
 
     def _schedule_ui_refresh(self):
         if self._ui_refresh_job is not None:
-            try:
-                self.after_cancel(self._ui_refresh_job)
-            except Exception:
-                pass
+            try: self.after_cancel(self._ui_refresh_job)
+            except Exception: pass
         self._ui_refresh_job = self.after(UI_REFRESH_MS, self._refresh_readback_ui)
 
     def _refresh_readback_ui(self):
@@ -788,6 +790,8 @@ class PowerSupplyTab(ttk.Frame):
             vals[_COL_MEAS_V] = cache.get("meas_v", "---")
             vals[_COL_MEAS_A] = cache.get("meas_a", "---")
             self.tree.item(ch_id, values=vals)
+        # Keep output buttons aligned after readback ticks
+        self._reposition_output_btns()
         if self._poll_manager.is_running():
             self._schedule_ui_refresh()
         else:
