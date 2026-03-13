@@ -7,13 +7,13 @@ from utils.live_poll_manager import LivePollManager
 
 _logger = get_logger(__name__)
 
-# channels= must match actual hardware:
-#   Keysight E36234A  -> 4 channels
-#   Keysight E36233A  -> 2 channels
-#   Agilent E3648A    -> 2 channels
-#   HP 6633B          -> 1 channel
+# channels= must match actual hardware outputs in use:
+#   Keysight E36234A  -> 2 outputs (Output 1 / Output 2)
+#   Keysight E36233A  -> 2 outputs
+#   Agilent E3648A    -> 2 outputs
+#   HP 6633B          -> 1 output
 POWER_SUPPLIES = [
-    {"name": "Keysight_E36234A",      "channels": 4},
+    {"name": "Keysight_E36234A",      "channels": 2},
     {"name": "Keysight_E36233A",      "channels": 2},
     {"name": "Agilent_E3648A_GPIB15", "channels": 2},
     {"name": "Agilent_E3648A_GPIB11", "channels": 2},
@@ -152,9 +152,9 @@ class PowerSupplyTab(ttk.Frame):
         avail_frame = ttk.LabelFrame(pane, text="Available Power Supplies  (select then click + Add Supply)")
         pane.add(avail_frame, weight=1)
 
-        av_cols = ("Supply", "Alias", "Channels", "Connected")
+        av_cols = ("Supply", "Alias", "Outputs", "Connected")
         self.avail_tree = ttk.Treeview(avail_frame, columns=av_cols, show="headings", height=5)
-        for col, w in {"Supply": 240, "Alias": 200, "Channels": 80, "Connected": 90}.items():
+        for col, w in {"Supply": 240, "Alias": 200, "Outputs": 80, "Connected": 90}.items():
             self.avail_tree.heading(col, text=col)
             self.avail_tree.column(col, width=w, anchor="center")
         self.avail_tree.pack(fill="both", expand=True, padx=5, pady=5)
@@ -229,7 +229,7 @@ class PowerSupplyTab(ttk.Frame):
     def _populate_available_tree(self):
         self.avail_tree.delete(*self.avail_tree.get_children())
         for ps in POWER_SUPPLIES:
-            name = ps["name"]
+            name      = ps["name"]
             alias     = self._alias_map.get(name, "")
             connected = "Yes" if name in self._registry else "No"
             self.avail_tree.insert("", "end", iid=name,
@@ -248,26 +248,45 @@ class PowerSupplyTab(ttk.Frame):
             return
 
         dlg = tk.Toplevel(self)
-        dlg.title(f"Add Supply: {supply_name}")
+        dlg.title(f"Add: {supply_name}")
         dlg.grab_set()
         dlg.resizable(False, False)
 
-        ttk.Label(dlg, text=supply_name, font=("Segoe UI", 10, "bold")).pack(padx=14, pady=(12, 6))
+        alias = self._alias_map.get(supply_name, "")
+        display = f"{alias}  ({supply_name})" if alias else supply_name
+        ttk.Label(dlg, text=display, font=("Segoe UI", 10, "bold")).pack(padx=14, pady=(12, 4))
+        ttk.Label(
+            dlg,
+            text="Select which output(s) to add to the active list:",
+            foreground="gray",
+        ).pack(padx=14, pady=(0, 8))
 
-        choice = tk.StringVar(value="all")
-        ttk.Radiobutton(dlg, text="Add all channels", variable=choice, value="all").pack(anchor="w", padx=14, pady=2)
+        # Checkboxes — one per output so engineer can pick any combination
+        ch_vars = {}
         for ch in range(1, ps["channels"] + 1):
-            ttk.Radiobutton(dlg, text=f"Add CH{ch} only", variable=choice, value=str(ch)).pack(anchor="w", padx=14, pady=2)
+            var = tk.BooleanVar(value=True)
+            ch_vars[ch] = var
+            ttk.Checkbutton(
+                dlg,
+                text=f"Output {ch}  ({self._ch_label(supply_name, ch)})",
+                variable=var,
+            ).pack(anchor="w", padx=18, pady=3)
 
         def _do_add():
-            if choice.get() == "all":
-                for ch in range(1, ps["channels"] + 1):
+            added = 0
+            for ch, var in ch_vars.items():
+                if var.get():
                     self._add_active_row(f"{supply_name}_CH{ch}")
-            else:
-                self._add_active_row(f"{supply_name}_CH{choice.get()}")
+                    added += 1
+            if added == 0:
+                messagebox.showwarning("Nothing Selected", "Check at least one output to add.")
+                return
             dlg.destroy()
 
-        ttk.Button(dlg, text="Add", command=_do_add).pack(pady=12)
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(pady=12)
+        ttk.Button(btn_row, text="Add Selected", command=_do_add).pack(side="left", padx=6)
+        ttk.Button(btn_row, text="Cancel",        command=dlg.destroy).pack(side="left", padx=6)
 
     def _add_active_row(self, ch_id: str):
         if ch_id not in self._channels:
@@ -322,7 +341,7 @@ class PowerSupplyTab(ttk.Frame):
     def _on_double_click(self, event):
         col = self.tree.identify_column(event.x)
         if col == "#1":
-            return  # ignore double-click on checkbox column
+            return
         sel = self.tree.selection()
         if sel:
             self._open_edit_dialog(sel[0])
@@ -567,8 +586,8 @@ class PowerSupplyTab(ttk.Frame):
             drv.output_on(info["channel"], enable)
             state = "ON" if enable else "OFF"
             if self.tree.exists(ch_id):
-                vals     = list(self.tree.item(ch_id, "values"))
-                vals[9]  = state
+                vals    = list(self.tree.item(ch_id, "values"))
+                vals[9] = state
                 self.tree.item(ch_id, values=vals)
             color = "green" if enable else "gray"
             self.status_lbl.config(text=f"{info['label']} output {state}", foreground=color)
