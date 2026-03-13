@@ -1,17 +1,15 @@
 # tabs/signal_generator_tab.py
-import os
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox
 from utils.logger import get_logger
 from utils.freq_entry import FreqEntry
 
 _logger = get_logger(__name__)
 
-# Roots searched by the waveform file browser.
-# On the instrument PC, waveforms are typically under C:/Users or C:/user.
-WAVEFORM_ROOTS = [r"C:\Users", r"C:\user", r"C:\users",
-                  r"D:\Users", r"D:\user"]
-WAVEFORM_EXTS  = {".wv", ".iq", ".bin", ".csv"}
+# Default roots to show in the dropdown — these are paths on the INSTRUMENT,
+# queried via MMEM:CAT? over VISA (not the local PC filesystem).
+INSTRUMENT_ROOTS = ["/var/user", "/user", "/users", "/var/user/waveform"]
+WAVEFORM_EXTS    = {".wv", ".iq", ".bin", ".csv"}
 
 
 class SignalGeneratorTab(ttk.Frame):
@@ -35,7 +33,7 @@ class SignalGeneratorTab(ttk.Frame):
                 "Go to Device Manager and click Connect All.")
         return drv
 
-    # ── UI ─────────────────────────────────────────────────────
+    # ── UI ──────────────────────────────────────────────────────
     def _build_ui(self):
         ttk.Label(self, text="Signal Generator - R&S SMBV100B",
                   font=("Segoe UI", 14, "bold")).pack(pady=10)
@@ -50,12 +48,11 @@ class SignalGeneratorTab(ttk.Frame):
                                      foreground="gray")
         self.status_lbl.pack(pady=5)
 
-    # ── LEFT: RF Settings ──────────────────────────────────────
+    # ── LEFT: RF Settings ───────────────────────────────────────
     def _build_left(self, parent):
         left = ttk.LabelFrame(parent, text="RF Settings")
         left.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
-        # Frequency
         freq_frame = ttk.Frame(left)
         freq_frame.pack(fill="x", padx=10, pady=8)
         ttk.Label(freq_frame, text="Frequency:",
@@ -63,7 +60,6 @@ class SignalGeneratorTab(ttk.Frame):
         self.freq_fe = FreqEntry(freq_frame, width=14, default_unit="MHz")
         self.freq_fe.pack(side="left", padx=5)
 
-        # Power
         power_frame = ttk.Frame(left)
         power_frame.pack(fill="x", padx=10, pady=8)
         ttk.Label(power_frame, text="Power Level:",
@@ -73,7 +69,6 @@ class SignalGeneratorTab(ttk.Frame):
                   width=16).pack(side="left", padx=5)
         ttk.Label(power_frame, text="dBm").pack(side="left")
 
-        # Modulation
         mod_frame = ttk.Frame(left)
         mod_frame.pack(fill="x", padx=10, pady=8)
         ttk.Label(mod_frame, text="Modulation:",
@@ -85,13 +80,9 @@ class SignalGeneratorTab(ttk.Frame):
             state="readonly").pack(side="left", padx=5)
 
         ttk.Button(left, text="Apply Settings",
-                   command=self._apply_settings).pack(
-                   pady=10, padx=10, fill="x")
+                   command=self._apply_settings).pack(pady=10, padx=10, fill="x")
+        ttk.Separator(left, orient="horizontal").pack(fill="x", padx=10, pady=5)
 
-        ttk.Separator(left, orient="horizontal").pack(
-            fill="x", padx=10, pady=5)
-
-        # RF toggle
         rf_frame = ttk.Frame(left)
         rf_frame.pack(fill="x", padx=10, pady=8)
         ttk.Label(rf_frame, text="RF Output:",
@@ -104,10 +95,8 @@ class SignalGeneratorTab(ttk.Frame):
                                         foreground="red")
         self.rf_status_lbl.pack(side="left", padx=10)
 
-        ttk.Separator(left, orient="horizontal").pack(
-            fill="x", padx=10, pady=5)
+        ttk.Separator(left, orient="horizontal").pack(fill="x", padx=10, pady=5)
 
-        # Presets
         preset_frame = ttk.LabelFrame(left, text="Quick Presets")
         preset_frame.pack(fill="x", padx=10, pady=5)
         ttk.Button(preset_frame, text="1 GHz / 0 dBm",
@@ -120,37 +109,35 @@ class SignalGeneratorTab(ttk.Frame):
                    command=lambda: self._apply_preset(5.8e9, -20)).pack(
                    side="left", padx=5, pady=5)
 
-    # ── RIGHT: Waveform Management ─────────────────────────────
+    # ── RIGHT: Waveform Management ──────────────────────────────
     def _build_right(self, parent):
         right = ttk.LabelFrame(parent, text="Waveform Management")
         right.pack(side="right", fill="both", expand=True)
 
-        # ── File browser section ──────────────────────────────
-        fb_lf = ttk.LabelFrame(right, text="Browse Machine Waveform Files")
+        # ── Instrument file browser ─────────────────────────────
+        fb_lf = ttk.LabelFrame(right, text="Browse Instrument Files (via VISA)")
         fb_lf.pack(fill="both", expand=True, padx=8, pady=(6, 4))
         fb_lf.rowconfigure(1, weight=1)
         fb_lf.columnconfigure(0, weight=1)
 
-        # Root selector
+        # Root path row
         root_row = ttk.Frame(fb_lf)
         root_row.grid(row=0, column=0, columnspan=2,
                       sticky="ew", padx=6, pady=(4, 2))
-        ttk.Label(root_row, text="Root folder:").pack(side="left", padx=(0, 4))
-        self._fb_root_var = tk.StringVar()
+        ttk.Label(root_row, text="Instrument path:").pack(side="left", padx=(0, 4))
+        self._fb_root_var = tk.StringVar(value=INSTRUMENT_ROOTS[0])
         self._fb_root_cb  = ttk.Combobox(
             root_row, textvariable=self._fb_root_var,
-            values=self._get_available_roots(),
-            state="readonly", width=22)
+            values=INSTRUMENT_ROOTS,
+            width=22)                          # editable — user can type any path
         self._fb_root_cb.pack(side="left", padx=(0, 4))
-        if self._fb_root_cb["values"]:
-            self._fb_root_cb.current(0)
         self._fb_root_cb.bind("<<ComboboxSelected>>",
                                lambda e: self._fb_populate_tree())
-        ttk.Button(root_row, text="Custom…",
-                   command=self._fb_browse_custom).pack(side="left", padx=2)
-        ttk.Button(root_row, text="↺",
-                   command=self._fb_populate_tree,
-                   width=3).pack(side="left", padx=2)
+        ttk.Button(root_row, text="↺  Browse",
+                   command=self._fb_populate_tree).pack(side="left", padx=2)
+
+        ttk.Label(root_row, text="(instrument must be connected)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
 
         # Tree + scrollbars
         tree_frame = ttk.Frame(fb_lf)
@@ -160,10 +147,11 @@ class SignalGeneratorTab(ttk.Frame):
 
         self._fb_tree = ttk.Treeview(
             tree_frame, columns=("size",), show="tree headings", height=10)
-        self._fb_tree.heading("#0",    text="Name", anchor="w")
-        self._fb_tree.heading("size",  text="Size", anchor="e")
-        self._fb_tree.column("#0",    width=260, anchor="w")
-        self._fb_tree.column("size",  width=70,  anchor="e")
+        self._fb_tree.heading("#0",   text="Name", anchor="w")
+        self._fb_tree.heading("size", text="Size",  anchor="e")
+        self._fb_tree.column("#0",   width=260, anchor="w")
+        self._fb_tree.column("size", width=70,  anchor="e")
+
         fb_vsb = ttk.Scrollbar(tree_frame, orient="vertical",
                                 command=self._fb_tree.yview)
         fb_hsb = ttk.Scrollbar(tree_frame, orient="horizontal",
@@ -174,19 +162,15 @@ class SignalGeneratorTab(ttk.Frame):
         fb_vsb.grid(row=0, column=1, sticky="ns")
         fb_hsb.grid(row=1, column=0, sticky="ew")
 
-        # Expand folder on click
-        self._fb_tree.bind("<<TreeviewOpen>>",  self._fb_on_expand)
-        self._fb_tree.bind("<Double-1>",        self._fb_on_double_click)
+        self._fb_tree.bind("<<TreeviewOpen>>", self._fb_on_expand)
+        self._fb_tree.bind("<Double-1>",       self._fb_on_double_click)
 
-        # File browser action buttons
+        # Action buttons
         fb_btn = ttk.Frame(fb_lf)
-        fb_btn.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
-        ttk.Button(fb_btn, text="Load to Device",
-                   command=self._fb_upload_selected).pack(
-                   side="left", padx=(0, 4))
+        fb_btn.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 4))
         ttk.Button(fb_btn, text="Set as Active Waveform",
-                   command=self._fb_set_active).pack(
-                   side="left", padx=4)
+                   command=self._fb_set_active,
+                   style="Primary.TButton").pack(side="left", padx=(0, 4))
 
         self._fb_selected_path: str = ""
         self._fb_selected_lbl = ttk.Label(
@@ -194,11 +178,8 @@ class SignalGeneratorTab(ttk.Frame):
         self._fb_selected_lbl.grid(
             row=3, column=0, sticky="w", padx=6, pady=(0, 4))
 
-        # Populate on startup
-        self._fb_populate_tree()
-
-        # ── Waveforms on device ───────────────────────────────
-        dev_lf = ttk.LabelFrame(right, text="Waveforms on Device")
+        # ── Waveforms on device ────────────────────────────────
+        dev_lf = ttk.LabelFrame(right, text="Waveforms on Device (ARB Catalogue)")
         dev_lf.pack(fill="x", padx=8, pady=(0, 6))
 
         ttk.Button(dev_lf, text="↺  Refresh Waveform List",
@@ -219,61 +200,93 @@ class SignalGeneratorTab(ttk.Frame):
             dev_lf, text="Selected: None", foreground="gray")
         self.selected_wf_lbl.pack(padx=8, pady=(0, 6))
 
-    # ── File browser logic ─────────────────────────────────────
-    def _get_available_roots(self) -> list:
-        """Return only roots that actually exist on this machine."""
-        return [r for r in WAVEFORM_ROOTS if os.path.isdir(r)]
+    # ── Instrument file browser logic ───────────────────────────
+    def _mmem_cat(self, path: str) -> list[dict]:
+        """
+        Query MMEM:CAT? on the instrument for the given path.
+        Returns a list of dicts: {name, type, size}
+          type: 'DIR' for folders, 'BIN'/'ASC'/etc for files
+        """
+        drv = self._registry.get(self.DRIVER_NAME)
+        if drv is None or drv._inst is None:
+            return []
+        try:
+            raw = drv._inst.query(f"MMEM:CAT? '{path}'").strip()
+        except Exception as e:
+            _logger.warning(f"MMEM:CAT? '{path}' failed: {e}")
+            return []
 
-    def _fb_browse_custom(self):
-        chosen = filedialog.askdirectory(title="Select root folder")
-        if chosen:
-            chosen = os.path.normpath(chosen)
-            vals   = list(self._fb_root_cb["values"])
-            if chosen not in vals:
-                vals.append(chosen)
-                self._fb_root_cb["values"] = vals
-            self._fb_root_var.set(chosen)
-            self._fb_populate_tree()
+        # Response format: <used_bytes>,<free_bytes>,"name,type,size","name,type,size",...
+        entries = []
+        parts   = raw.split(",")
+        i = 2   # skip used / free byte counts
+        while i + 2 < len(parts):
+            name  = parts[i].strip().strip('"')
+            ftype = parts[i + 1].strip().strip('"').upper()
+            try:
+                size = int(parts[i + 2].strip().strip('"'))
+            except ValueError:
+                size = 0
+            if name:
+                entries.append({"name": name, "type": ftype, "size": size})
+            i += 3
+        return entries
 
     def _fb_populate_tree(self):
-        root = self._fb_root_var.get()
-        if not root or not os.path.isdir(root):
+        """Load the top level of the selected instrument path."""
+        root = self._fb_root_var.get().strip()
+        if not root:
             return
         self._fb_tree.delete(*self._fb_tree.get_children())
-        self._fb_insert_dir("", root, top_level=True)
 
-    def _fb_insert_dir(self, parent_iid: str, path: str,
-                       top_level: bool = False):
-        """Insert one directory level into the tree."""
-        try:
-            entries = sorted(os.scandir(path),
-                             key=lambda e: (not e.is_dir(), e.name.lower()))
-        except PermissionError:
+        drv = self._registry.get(self.DRIVER_NAME)
+        if drv is None:
+            self._fb_tree.insert("", "end",
+                                  text="⚠  Instrument not connected — connect first",
+                                  values=("",))
             return
-        for entry in entries:
-            if entry.is_dir():
-                iid = self._fb_tree.insert(
-                    parent_iid, "end",
-                    text=entry.name,
-                    values=("",),
-                    open=False,
-                    tags=("dir",))
-                # Insert a dummy child so the expand arrow appears
-                self._fb_tree.insert(iid, "end", text="loading…",
-                                      tags=("placeholder",))
-                self._fb_tree.item(iid, tags=("dir",))
-                # Store full path in iid
-                self._fb_tree.item(iid, tags=("dir", entry.path))
-            elif os.path.splitext(entry.name)[1].lower() in WAVEFORM_EXTS:
-                size_kb = entry.stat().st_size // 1024
-                self._fb_tree.insert(
-                    parent_iid, "end",
-                    text=entry.name,
-                    values=(f"{size_kb} KB" if size_kb else "< 1 KB",),
-                    tags=("file", entry.path))
+
+        self._fb_insert_level("", root)
+
+    def _fb_insert_level(self, parent_iid: str, path: str):
+        """Insert one level of MMEM:CAT? results into the tree."""
+        entries = self._mmem_cat(path)
+        if not entries:
+            self._fb_tree.insert(parent_iid, "end",
+                                  text="(empty or inaccessible)",
+                                  values=("",), tags=("placeholder",))
+            return
+
+        # Folders first, then files
+        folders = [e for e in entries if e["type"] == "DIR"]
+        files   = [e for e in entries
+                   if e["type"] != "DIR"
+                   and any(e["name"].lower().endswith(x)
+                           for x in WAVEFORM_EXTS)]
+
+        for folder in sorted(folders, key=lambda e: e["name"].lower()):
+            full = f"{path.rstrip('/')}/{folder['name']}"
+            iid  = self._fb_tree.insert(
+                parent_iid, "end",
+                text=folder["name"],
+                values=("",),
+                open=False,
+                tags=("dir", full))
+            # Placeholder child so the expand arrow appears
+            self._fb_tree.insert(iid, "end", text="loading…",
+                                  tags=("placeholder",))
+
+        for f in sorted(files, key=lambda e: e["name"].lower()):
+            full    = f"{path.rstrip('/')}/{f['name']}"
+            size_kb = f["size"] // 1024
+            self._fb_tree.insert(
+                parent_iid, "end",
+                text=f["name"],
+                values=(f"{size_kb} KB" if size_kb else "< 1 KB",),
+                tags=("file", full))
 
     def _fb_on_expand(self, event=None):
-        """Lazy-load directory contents on first expand."""
+        """Lazy-load a directory when the user expands it."""
         iid = self._fb_tree.focus()
         if not iid:
             return
@@ -281,94 +294,64 @@ class SignalGeneratorTab(ttk.Frame):
         if len(children) == 1:
             first_tags = self._fb_tree.item(children[0], "tags")
             if "placeholder" in first_tags:
-                # Find the real path from our tag storage
-                full_path = self._fb_get_path(iid)
-                if full_path and os.path.isdir(full_path):
+                full_path = self._fb_path_from_tags(iid)
+                if full_path:
                     self._fb_tree.delete(children[0])
-                    self._fb_insert_dir(iid, full_path)
+                    self._fb_insert_level(iid, full_path)
 
-    def _fb_get_path(self, iid: str) -> str:
-        """Recover full filesystem path stored in the item's tags."""
+    def _fb_path_from_tags(self, iid: str) -> str:
+        """Retrieve the instrument path stored in an item's tags."""
         tags = self._fb_tree.item(iid, "tags")
         for tag in tags:
-            if os.sep in tag or (len(tag) > 2 and tag[1] == ":"):
+            if tag.startswith("/"):    # POSIX-style instrument path
                 return tag
-        # Fallback: reconstruct from tree hierarchy
-        parts = []
-        node  = iid
-        while node:
-            parts.insert(0, self._fb_tree.item(node, "text"))
-            node = self._fb_tree.parent(node)
-        root = self._fb_root_var.get()
-        return os.path.join(root, *parts[1:]) if parts else root
+        return ""
 
     def _fb_on_double_click(self, event=None):
-        """Select a waveform file on double-click."""
+        """Highlight a waveform file on double-click."""
         iid = self._fb_tree.focus()
         if not iid:
             return
         tags = self._fb_tree.item(iid, "tags")
         if "file" in tags:
-            path = self._fb_get_path(iid)
-            if path and os.path.isfile(path):
+            path = self._fb_path_from_tags(iid)
+            if path:
                 self._fb_selected_path = path
+                name = path.split("/")[-1]
                 self._fb_selected_lbl.config(
-                    text=f"Selected: {os.path.basename(path)}",
+                    text=f"Selected: {name}",
                     foreground="#1a5c1a")
 
-    def _fb_upload_selected(self):
-        """Upload the currently highlighted file to the instrument."""
-        if not self._fb_selected_path:
-            # Try to get from current selection
+    def _fb_set_active(self):
+        """Set the double-clicked instrument file as the active waveform."""
+        path = self._fb_selected_path
+        if not path:
             iid = self._fb_tree.focus()
             if iid:
                 self._fb_on_double_click()
-        path = self._fb_selected_path
-        if not path or not os.path.isfile(path):
+                path = self._fb_selected_path
+        if not path:
             messagebox.showwarning(
-                "No File", "Double-click a waveform file first.")
+                "No File", "Double-click a waveform file in the tree first.")
             return
         drv = self._get_driver()
         if drv is None:
             return
+        name = path.split("/")[-1]
         try:
-            drv.upload_waveform(path)
-            self.status_lbl.config(
-                text=f"Status: Uploaded {os.path.basename(path)}",
-                foreground="green")
-            _logger.info(f"SigGen uploaded waveform: {path}")
-            self._refresh_waveforms()
-        except Exception as e:
-            messagebox.showerror("Upload Error", str(e))
-            _logger.error(f"SigGen waveform upload failed: {e}")
-
-    def _fb_set_active(self):
-        """Set a file already on the instrument as the active waveform."""
-        iid = self._fb_tree.focus()
-        if not iid:
-            return
-        tags = self._fb_tree.item(iid, "tags")
-        if "file" not in tags:
-            messagebox.showwarning(
-                "Not a file", "Select a waveform file in the tree first.")
-            return
-        path = self._fb_get_path(iid)
-        name = os.path.basename(path)
-        drv  = self._get_driver()
-        if drv is None:
-            return
-        try:
-            drv.set_waveform(name)
+            # Pass the full instrument path so set_waveform doesn't prepend
+            # the default waveform dir
+            drv.set_waveform(path)
             self.selected_wf_lbl.config(
                 text=f"Selected: {name}", foreground="green")
             self.status_lbl.config(
                 text=f"Status: Active waveform → {name}", foreground="green")
-            _logger.info(f"SigGen active waveform: {name}")
+            _logger.info(f"SigGen active waveform set: {path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
             _logger.error(f"SigGen set active waveform failed: {e}")
 
-    # ── Settings ───────────────────────────────────────────────
+    # ── Settings ────────────────────────────────────────────────
     def _apply_settings(self):
         drv = self._get_driver()
         if drv is None:
@@ -402,7 +385,7 @@ class SignalGeneratorTab(ttk.Frame):
         self.power_var.set(str(power))
         self._apply_settings()
 
-    # ── RF toggle ──────────────────────────────────────────────
+    # ── RF toggle ───────────────────────────────────────────────
     def _toggle_rf(self):
         drv = self._get_driver()
         if drv is None:
@@ -413,16 +396,14 @@ class SignalGeneratorTab(ttk.Frame):
             self.rf_state_var.set(new_state)
             self.rf_btn.config(text=f"RF {new_state}")
             color = "green" if new_state == "ON" else "red"
-            self.rf_status_lbl.config(
-                text=f"RF is {new_state}", foreground=color)
-            self.status_lbl.config(
-                text=f"Status: RF {new_state}", foreground=color)
+            self.rf_status_lbl.config(text=f"RF is {new_state}", foreground=color)
+            self.status_lbl.config(text=f"Status: RF {new_state}", foreground=color)
             _logger.info(f"SigGen RF {new_state}")
         except Exception as e:
             messagebox.showerror("Hardware Error", str(e))
             _logger.error(f"SigGen RF toggle failed: {e}")
 
-    # ── Waveforms on device ────────────────────────────────────
+    # ── Waveforms on device ─────────────────────────────────────
     def _refresh_waveforms(self):
         drv = self._get_driver()
         if drv is None:
@@ -457,8 +438,7 @@ class SignalGeneratorTab(ttk.Frame):
             self.selected_wf_lbl.config(
                 text=f"Selected: {wf_name}", foreground="green")
             self.status_lbl.config(
-                text=f"Status: Waveform set to {wf_name}",
-                foreground="green")
+                text=f"Status: Waveform set to {wf_name}", foreground="green")
             _logger.info(f"SigGen waveform selected: {wf_name}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -489,7 +469,7 @@ class SignalGeneratorTab(ttk.Frame):
             messagebox.showerror("Error", str(e))
             _logger.error(f"SigGen delete waveform failed: {e}")
 
-    # ── get_settings / load_settings ──────────────────────────
+    # ── get_settings / load_settings ────────────────────────────
     def get_settings(self) -> dict:
         return {
             "freq_hz":    self.freq_fe.get_hz(),
