@@ -7,11 +7,6 @@ from utils.live_poll_manager import LivePollManager
 
 _logger = get_logger(__name__)
 
-# channels= must match actual hardware outputs in use:
-#   Keysight E36234A  -> 2 outputs (Output 1 / Output 2)
-#   Keysight E36233A  -> 2 outputs
-#   Agilent E3648A    -> 2 outputs
-#   HP 6633B          -> 1 output
 POWER_SUPPLIES = [
     {"name": "Keysight_E36234A",      "channels": 2},
     {"name": "Keysight_E36233A",      "channels": 2},
@@ -20,7 +15,6 @@ POWER_SUPPLIES = [
     {"name": "HP_6633B",              "channels": 1},
 ]
 
-# Column index map (matches act_cols order)
 _COL_CHECK   = 0
 _COL_CHANNEL = 1
 _COL_ROLE    = 2
@@ -36,25 +30,26 @@ ALIASES_FILE         = "instrument_aliases.json"
 READBACK_INTERVAL_MS = 1500
 UI_REFRESH_MS        = 250
 
+# Locked cell sentinel value shown to the user
+_LOCKED = "—"
+
 
 class PowerSupplyTab(ttk.Frame):
     def __init__(self, parent, driver_registry: dict):
         super().__init__(parent)
         self._registry      = driver_registry
-        self._channels      = {}   # ch_id -> channel state dict
-        self._active_rows   = []   # ordered list of ch_ids the user has added
-        self._row_checked   = {}   # ch_id -> tk.BooleanVar
-        self._output_state  = {}   # ch_id -> bool  (True = ON)
-        self._output_btns   = {}   # ch_id -> tk.Button overlay
+        self._channels      = {}
+        self._active_rows   = []
+        self._row_checked   = {}
+        self._output_state  = {}
+        self._output_btns   = {}
         self._alias_map     = self._load_aliases()
         self._inline_widget = None
-
         self._ui_refresh_job = None
         self._poll_manager = LivePollManager(
             registry_getter=lambda: self._registry,
             channels_getter=lambda: self._channels,
         )
-
         self._build_ui()
         self._init_channel_store()
 
@@ -71,11 +66,9 @@ class PowerSupplyTab(ttk.Frame):
         self._stop_live_readback()
 
     def get_pairs(self) -> list:
-        """DEPRECATED — kept for sequencer compatibility until Batch 2."""
         return []
 
     def get_active_channels(self) -> list:
-        """Batch 2 sequencer API: returns all checked active channel records."""
         result = []
         for ch_id in self._active_rows:
             if not self._row_checked.get(ch_id, tk.BooleanVar(value=False)).get():
@@ -118,29 +111,24 @@ class PowerSupplyTab(ttk.Frame):
     # ── UI build ───────────────────────────────────────────────
     def _build_ui(self):
         ttk.Label(
-            self,
-            text="Power Supply Configuration",
+            self, text="Power Supply Configuration",
             font=("Segoe UI", 14, "bold"),
         ).pack(pady=10)
 
-        # ── Top bar ──────────────────────────────────────────
         top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=(0, 4))
         ttk.Button(top, text="+ Add Supply", command=self._open_add_dialog).pack(side="left", padx=(0, 4))
         ttk.Label(
             top,
-            text="Click a cell to edit inline.  Double-click opens full edit dialog.",
+            text="Click a cell to edit inline.  Double-click opens full edit dialog.  — = locked by mode.",
             foreground="gray",
         ).pack(side="left", padx=12)
 
-        # ── Main paned area ────────────────────────────────────
         pane = ttk.PanedWindow(self, orient="vertical")
         pane.pack(fill="both", expand=True, padx=10, pady=4)
 
-        # ── Available supplies bank ────────────────────────────
         avail_frame = ttk.LabelFrame(pane, text="Available Power Supplies  (select then click + Add Supply)")
         pane.add(avail_frame, weight=1)
-
         av_cols = ("Supply", "Alias", "Outputs", "Connected")
         self.avail_tree = ttk.Treeview(avail_frame, columns=av_cols, show="headings", height=5)
         for col, w in {"Supply": 240, "Alias": 200, "Outputs": 80, "Connected": 90}.items():
@@ -148,7 +136,6 @@ class PowerSupplyTab(ttk.Frame):
             self.avail_tree.column(col, width=w, anchor="center")
         self.avail_tree.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # ── Active supplies work area ──────────────────────────
         active_frame = ttk.LabelFrame(pane, text="Active Supplies")
         pane.add(active_frame, weight=4)
 
@@ -161,23 +148,22 @@ class PowerSupplyTab(ttk.Frame):
         }.items():
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="center")
+
+        # Tag for locked (mode-blocked) cells — muted gray
+        self.tree.tag_configure("locked", foreground="#888888")
+
         self.tree.pack(fill="both", expand=True, padx=5, pady=5)
         self.tree.bind("<Button-1>",  self._on_click)
         self.tree.bind("<Double-1>",  self._on_double_click)
         self.tree.bind("<Configure>", lambda e: self._reposition_output_btns())
 
-        # ── Bottom bar ────────────────────────────────────────
         bot = ttk.Frame(active_frame)
         bot.pack(fill="x", padx=5, pady=(0, 4))
-
         ttk.Button(bot, text="Edit Selected",   command=self._edit_selected).pack(side="left", padx=(0, 4))
         ttk.Button(bot, text="Remove Selected", command=self._remove_selected).pack(side="left", padx=4)
         ttk.Button(bot, text="Read Once",       command=self._read_once).pack(side="left", padx=4)
-
         ttk.Separator(bot, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
-
         ttk.Button(bot, text="Set Checked", command=self._set_checked_rows).pack(side="left", padx=4)
-
         tk.Button(
             bot, text="  ON (all checked)  ",
             bg="#1a7a1a", fg="white",
@@ -185,7 +171,6 @@ class PowerSupplyTab(ttk.Frame):
             font=("Segoe UI", 9, "bold"),
             command=lambda: self._output_checked(True),
         ).pack(side="left", padx=4)
-
         tk.Button(
             bot, text="  OFF (all checked)  ",
             bg="#8b0000", fg="white",
@@ -194,7 +179,6 @@ class PowerSupplyTab(ttk.Frame):
             command=lambda: self._output_checked(False),
         ).pack(side="left", padx=4)
 
-        # ── Readback controls ───────────────────────────────
         rb = ttk.Frame(active_frame)
         rb.pack(fill="x", padx=5, pady=(0, 6))
         ttk.Label(rb, text="Readback interval (ms):").pack(side="left", padx=(0, 4))
@@ -210,7 +194,6 @@ class PowerSupplyTab(ttk.Frame):
     def _init_channel_store(self):
         existing = {k: v for k, v in self._channels.items()}
         self._channels.clear()
-
         for ps in POWER_SUPPLIES:
             name = ps["name"]
             for ch in range(1, ps["channels"] + 1):
@@ -232,7 +215,6 @@ class PowerSupplyTab(ttk.Frame):
                     "max_idq_ma":       prev.get("max_idq_ma",       tk.StringVar(value="")),
                 }
                 self._poll_manager.ensure_channel(ch_id)
-
         self._poll_manager.remove_missing_channels(self._channels.keys())
         self._populate_available_tree()
         self._refresh_active_tree()
@@ -252,22 +234,18 @@ class PowerSupplyTab(ttk.Frame):
         if not sel:
             messagebox.showwarning("No Selection", "Select a supply from the Available list first.")
             return
-
         supply_name = sel[0]
         ps = next((x for x in POWER_SUPPLIES if x["name"] == supply_name), None)
         if not ps:
             return
-
         dlg = tk.Toplevel(self)
         dlg.title(f"Add: {supply_name}")
         dlg.grab_set()
         dlg.resizable(False, False)
-
         alias   = self._alias_map.get(supply_name, "")
         display = f"{alias}  ({supply_name})" if alias else supply_name
         ttk.Label(dlg, text=display, font=("Segoe UI", 10, "bold")).pack(padx=14, pady=(12, 4))
         ttk.Label(dlg, text="Select which output(s) to add:", foreground="gray").pack(padx=14, pady=(0, 8))
-
         ch_vars = {}
         for ch in range(1, ps["channels"] + 1):
             var = tk.BooleanVar(value=True)
@@ -317,69 +295,60 @@ class PowerSupplyTab(ttk.Frame):
         self._destroy_output_btn(ch_id)
         self._refresh_active_tree()
 
+    # ── Row values helper ────────────────────────────────────────
+    def _row_values(self, ch_id: str, checked_str: str, meas_v="---", meas_a="---") -> tuple:
+        """Build the full values tuple for a row. Locked cells get the — sentinel."""
+        info = self._channels[ch_id]
+        mode = info["mode"]
+        if mode == "CV":
+            set_v = info["volt_var"].get() or ""
+            set_a = _LOCKED                              # CC-only — locked in CV mode
+            prot  = f"OCP {info['ocp_var'].get()} A" if info["ocp_var"].get() else ""
+        else:
+            set_v = _LOCKED                              # CV-only — locked in CC mode
+            set_a = info["curr_var"].get() or ""
+            prot  = f"OVP {info['ovp_var'].get()} V" if info["ovp_var"].get() else ""
+        return (checked_str, info["label"], info["role"], mode,
+                set_v, set_a, prot, meas_v, meas_a, "")
+
     def _refresh_active_tree(self):
-        # Destroy all overlay buttons before rebuilding rows
         for ch_id in list(self._output_btns):
             self._destroy_output_btn(ch_id)
-
         self.tree.delete(*self.tree.get_children())
         for ch_id in self._active_rows:
             info    = self._channels[ch_id]
             checked = "☑" if self._row_checked.get(ch_id, tk.BooleanVar(value=True)).get() else "☐"
-
-            if info["mode"] == "CV":
-                set_v = info["volt_var"].get()
-                set_a = ""
-                prot  = f"OCP {info['ocp_var'].get()} A" if info["ocp_var"].get() else ""
-            else:
-                set_v = ""
-                set_a = info["curr_var"].get()
-                prot  = f"OVP {info['ovp_var'].get()} V" if info["ovp_var"].get() else ""
-
-            # Output column text is blank — the overlay button covers it
-            self.tree.insert("", "end", iid=ch_id, values=(
-                checked, info["label"], info["role"], info["mode"],
-                set_v, set_a, prot, "---", "---", "",
-            ))
-
-        # Rebuild overlay buttons after a short delay so bbox is valid
+            vals    = self._row_values(ch_id, checked)
+            # Apply locked tag when either set cell is blocked
+            tag = "locked" if info["mode"] in ("CV", "CC") else ""
+            self.tree.insert("", "end", iid=ch_id, values=vals, tags=(tag,))
         self.tree.after(30, self._reposition_output_btns)
 
-    # ── Per-row output toggle buttons (overlaid on Output column) ──
+    # ── Per-row output toggle buttons ────────────────────────────
     def _get_output_col_id(self) -> str:
-        """Return the Treeview column identifier for the Output column."""
         cols = self.tree["columns"]
         return f"#{cols.index('Output') + 1}"
 
     def _reposition_output_btns(self):
-        """Create or reposition one overlay button per active row."""
         col_id = self._get_output_col_id()
         for ch_id in self._active_rows:
             bbox = self.tree.bbox(ch_id, col_id)
             if not bbox:
-                # Row scrolled out of view — hide the button
                 btn = self._output_btns.get(ch_id)
                 if btn:
                     btn.place_forget()
                 continue
-
             x, y, w, h = bbox
             is_on = self._output_state.get(ch_id, False)
-
             if ch_id not in self._output_btns:
-                # Create fresh button
                 btn = tk.Button(
                     self.tree,
                     font=("Segoe UI", 8, "bold"),
-                    relief="flat",
-                    bd=0,
-                    cursor="hand2",
+                    relief="flat", bd=0, cursor="hand2",
                 )
                 self._output_btns[ch_id] = btn
             else:
                 btn = self._output_btns[ch_id]
-
-            # Update appearance based on current state
             if is_on:
                 btn.config(
                     text="ON",
@@ -394,23 +363,16 @@ class PowerSupplyTab(ttk.Frame):
                     activebackground="#333333", activeforeground="white",
                     command=lambda cid=ch_id: self._toggle_output_btn(cid),
                 )
-
             btn.place(x=x + 2, y=y + 1, width=w - 4, height=h - 2)
 
     def _toggle_output_btn(self, ch_id: str):
-        """Toggle the output for a single row and update its button."""
-        current = self._output_state.get(ch_id, False)
-        new_state = not current
-        self._channel_output(ch_id, new_state)
-        # _channel_output updates _output_state and repositions button
+        self._channel_output(ch_id, not self._output_state.get(ch_id, False))
 
     def _destroy_output_btn(self, ch_id: str):
         btn = self._output_btns.pop(ch_id, None)
         if btn:
-            try:
-                btn.destroy()
-            except Exception:
-                pass
+            try: btn.destroy()
+            except Exception: pass
 
     # ── Inline cell editing ────────────────────────────────────
     _INLINE_COLS = {
@@ -425,28 +387,34 @@ class PowerSupplyTab(ttk.Frame):
         _COL_MODE: ["CV", "CC"],
     }
 
+    def _is_locked_col(self, ch_id: str, col_idx: int) -> bool:
+        """Return True if this column is blocked for this row's current mode."""
+        mode = self._channels[ch_id]["mode"]
+        if col_idx == _COL_SET_A and mode == "CV":
+            return True
+        if col_idx == _COL_SET_V and mode == "CC":
+            return True
+        return False
+
     def _on_click(self, event):
         region  = self.tree.identify_region(event.x, event.y)
         col_id  = self.tree.identify_column(event.x)
         ch_id   = self.tree.identify_row(event.y)
-
         self._dismiss_inline(commit=True)
-
         if region != "cell" or not ch_id:
             return
-
         col_idx = int(col_id.lstrip("#")) - 1
-
         if col_idx == _COL_CHECK:
             if ch_id in self._row_checked:
                 var = self._row_checked[ch_id]
                 var.set(not var.get())
                 self._refresh_active_tree()
             return
-
         if col_idx not in self._INLINE_COLS:
             return
-
+        # Block edit if cell is locked by mode
+        if self._is_locked_col(ch_id, col_idx):
+            return
         self._open_inline(ch_id, col_idx, col_id, self._INLINE_COLS[col_idx])
 
     def _on_double_click(self, event):
@@ -464,17 +432,14 @@ class PowerSupplyTab(ttk.Frame):
             return
         x, y, w, h = bbox
         info = self._channels[ch_id]
-
         if col_idx == _COL_ROLE:  cur_val = info["role"]
-        elif col_idx == _COL_MODE:  cur_val = info["mode"]
+        elif col_idx == _COL_MODE: cur_val = info["mode"]
         elif col_idx == _COL_SET_V: cur_val = info["volt_var"].get()
         elif col_idx == _COL_SET_A: cur_val = info["curr_var"].get()
         elif col_idx == _COL_PROT:
             cur_val = info["ocp_var"].get() if info["mode"] == "CV" else info["ovp_var"].get()
         else: cur_val = ""
-
         var = tk.StringVar(value=cur_val)
-
         if edit_type == "combo":
             widget = ttk.Combobox(
                 self.tree, textvariable=var,
@@ -484,7 +449,6 @@ class PowerSupplyTab(ttk.Frame):
             widget.set(cur_val)
         else:
             widget = ttk.Entry(self.tree, textvariable=var, width=max(w // 8, 6))
-
         widget.place(x=x, y=y, width=w, height=h)
         widget.focus_set()
         if edit_type == "entry":
@@ -503,13 +467,12 @@ class PowerSupplyTab(ttk.Frame):
         widget.bind("<FocusOut>", _commit)
         if edit_type == "combo":
             widget.bind("<<ComboboxSelected>>", _commit)
-
         self._inline_widget = widget
 
     def _apply_inline(self, ch_id, col_idx, value):
         info  = self._channels[ch_id]
         value = value.strip()
-        if col_idx == _COL_ROLE:  info["role"] = value
+        if col_idx == _COL_ROLE:   info["role"] = value
         elif col_idx == _COL_MODE:
             if value in ("CV", "CC"): info["mode"] = value
         elif col_idx == _COL_SET_V: info["volt_var"].set(value)
@@ -540,10 +503,8 @@ class PowerSupplyTab(ttk.Frame):
         dialog.title(f"Configure: {info['label']}")
         dialog.grab_set()
         dialog.resizable(False, False)
-
         ttk.Label(dialog, text=info["label"], font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, columnspan=2, padx=15, pady=10)
-
         role_var = tk.StringVar(value=info["role"])
         mode_var = tk.StringVar(value=info["mode"])
 
@@ -634,26 +595,12 @@ class PowerSupplyTab(ttk.Frame):
     def _update_tree_row(self, ch_id):
         if not self.tree.exists(ch_id):
             return
-        info    = self._channels[ch_id]
-        mode    = info["mode"]
         vals    = list(self.tree.item(ch_id, "values"))
         checked = vals[_COL_CHECK]
-
-        if mode == "CV":
-            set_v = info["volt_var"].get()
-            set_a = ""
-            prot  = f"OCP {info['ocp_var'].get()} A" if info["ocp_var"].get() else ""
-        else:
-            set_v = ""
-            set_a = info["curr_var"].get()
-            prot  = f"OVP {info['ovp_var'].get()} V" if info["ovp_var"].get() else ""
-
-        self.tree.item(ch_id, values=(
-            checked, info["label"], info["role"], mode,
-            set_v, set_a, prot,
-            vals[_COL_MEAS_V], vals[_COL_MEAS_A], "",
-        ))
-        # Re-sync button position after row content change
+        new_vals = self._row_values(ch_id, checked,
+                                    meas_v=vals[_COL_MEAS_V],
+                                    meas_a=vals[_COL_MEAS_A])
+        self.tree.item(ch_id, values=new_vals, tags=("locked",))
         self.tree.after(20, self._reposition_output_btns)
 
     # ── Group actions ───────────────────────────────────────────
@@ -732,10 +679,10 @@ class PowerSupplyTab(ttk.Frame):
             drv.output_on(info["channel"], enable)
             self._output_state[ch_id] = enable
             color = "green" if enable else "gray"
-            state = "ON" if enable else "OFF"
-            self.status_lbl.config(text=f"{info['label']} output {state}", foreground=color)
-            _logger.info(f"{ch_id} output {state}")
-            # Update the overlay button appearance immediately
+            self.status_lbl.config(
+                text=f"{info['label']} output {'ON' if enable else 'OFF'}",
+                foreground=color)
+            _logger.info(f"{ch_id} output {'ON' if enable else 'OFF'}")
             self._reposition_output_btns()
         except Exception as e:
             messagebox.showerror("Hardware Error", str(e))
@@ -751,8 +698,7 @@ class PowerSupplyTab(ttk.Frame):
     def _start_live_readback(self):
         try:
             interval_ms = int(self.rb_interval_var.get())
-            if interval_ms < 100:
-                raise ValueError
+            if interval_ms < 100: raise ValueError
         except ValueError:
             messagebox.showerror("Invalid Interval", "Interval must be an integer >= 100 ms.")
             return
@@ -790,7 +736,6 @@ class PowerSupplyTab(ttk.Frame):
             vals[_COL_MEAS_V] = cache.get("meas_v", "---")
             vals[_COL_MEAS_A] = cache.get("meas_a", "---")
             self.tree.item(ch_id, values=vals)
-        # Keep output buttons aligned after readback ticks
         self._reposition_output_btns()
         if self._poll_manager.is_running():
             self._schedule_ui_refresh()
