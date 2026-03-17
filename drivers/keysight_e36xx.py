@@ -12,31 +12,31 @@ Firmware quirks handled:
   - All queries strip trailing whitespace and \r\n
 
 Models:
-  E36233A  — 2 ch
-  E36234A  — 4 ch
+  E36233A  - 2 ch
+  E36234A  - 4 ch
 
 Method map vs. reference bench script (psc.Keysight_E36234A):
-  setVI(ch, volt, curr)                → set_vi(ch, volt, curr)
-  outOnOff(ch, 0/1)                    → output_on(ch, bool)
-  measCurr(ch)                         → measure_current(ch)
-  measVolt(ch)                         → measure_voltage(ch)
-  setCurrProtectionDelayStartCC(ch)    → set_ocp_delay_start_cc(ch)
-  setCurrProtectionDelay(ch, secs)     → set_ocp_delay(ch, secs)
-  currProtectionOnOff(ch, 1/0)         → ocp_enable(ch, bool)
-  askCurrProtectionTripped()           → ocp_tripped(ch)
-  clrOverCurrProtectionEvent(ch)       → ocp_clear(ch)
+  setVI(ch, volt, curr)                -> set_vi(ch, volt, curr)
+  outOnOff(ch, 0/1)                    -> output_on(ch, bool)
+  measCurr(ch)                         -> measure_current(ch)
+  measVolt(ch)                         -> measure_voltage(ch)
+  setCurrProtectionDelayStartCC(ch)    -> set_ocp_delay_start_cc(ch)
+  setCurrProtectionDelay(ch, secs)     -> set_ocp_delay(ch, secs)
+  currProtectionOnOff(ch, 1/0)         -> ocp_enable(ch, bool)
+  askCurrProtectionTripped()           -> ocp_tripped(ch)
+  clrOverCurrProtectionEvent(ch)       -> ocp_clear(ch)
 """
 import time
+from typing import List, Optional
 from utils.visa_manager import get_visa_rm
 from utils.logger import get_logger
 
-INTER_CMD_DELAY = 0.02   # seconds between writes and queries
-DEFAULT_TIMEOUT = 10000  # ms
+INTER_CMD_DELAY = 0.02
+DEFAULT_TIMEOUT = 10000
 
 
 class KeysightE36xxSupply:
-    def __init__(self, visa_address: str, name: str = "",
-                 channels: int = 2, debug: bool = False):
+    def __init__(self, visa_address, name="", channels=2, debug=False):
         self._logger       = get_logger(__name__)
         self._visa_address = visa_address
         self._name         = name or visa_address
@@ -44,25 +44,22 @@ class KeysightE36xxSupply:
         self._channels     = channels
         self._debug        = debug
 
-    # ── Connection ──────────────────────────────────────────────
+    # -- Connection -----------------------------------------------
     def connect(self):
         rm = get_visa_rm()
         inst = rm.open_resource(self._visa_address)
-        inst.timeout              = DEFAULT_TIMEOUT
-        inst.read_termination     = "\n"
-        inst.write_termination    = "\n"
-        inst.send_end             = True
+        inst.timeout           = DEFAULT_TIMEOUT
+        inst.read_termination  = "\n"
+        inst.write_termination = "\n"
+        inst.send_end          = True
         self._inst = inst
-
-        # Flush error queue and reset comms state
         self._write_raw("*CLS")
         self._write_raw("*RST")
-        time.sleep(0.3)   # let RST settle
-
+        time.sleep(0.3)
         idn = self._query_raw("*IDN?") or "IDN failed"
         self._logger.info(
-            f"Connected Keysight E36xx '{self._name}' "
-            f"@ {self._visa_address} ({self._channels}ch): {idn}")
+            "Connected Keysight E36xx '{}' @ {} ({}ch): {}".format(
+                self._name, self._visa_address, self._channels, idn))
 
     def close(self):
         if self._inst is None:
@@ -74,216 +71,187 @@ class KeysightE36xxSupply:
                 except Exception:
                     pass
             self._inst.close()
-            self._logger.info(f"Disconnected Keysight E36xx '{self._name}'")
+            self._logger.info("Disconnected Keysight E36xx '{}'".format(self._name))
         finally:
             self._inst = None
 
-    # ── Identification ──────────────────────────────────────────
-    def idn(self) -> str:
+    # -- Identification -------------------------------------------
+    def idn(self):
         if self._inst is None:
             return "Not connected"
         return self._query_raw("*IDN?") or "IDN query failed"
 
-    # ── Channel selection ───────────────────────────────────────
-    def _select_channel(self, channel: int):
-        """
-        Select output channel by numeric index.
-        INST:NSEL is the correct form for E362xx (not INST:SEL OUT{n}).
-        """
+    # -- Channel selection ----------------------------------------
+    def _select_channel(self, channel):
         self._check(channel)
-        self._write_raw(f"INST:NSEL {channel}")
+        self._write_raw("INST:NSEL {}".format(channel))
 
-    # ── Combined set (matches reference setVI) ────────────────────
-    def set_vi(self, channel: int, volts: float, amps: float):
+    # -- Combined set ---------------------------------------------
+    def set_vi(self, channel, volts, amps):
         """Set voltage and current limit in one call (matches setVI in reference)."""
         self.set_voltage(channel, volts)
         self.set_current(channel, amps)
 
-    # Alias for backwards compat with any code still using setVI
-    def setVI(self, channel: int, volts: float, amps: float):
+    def setVI(self, channel, volts, amps):
         self.set_vi(channel, volts, amps)
 
-    # ── Voltage / Current set ──────────────────────────────────
-    def set_voltage(self, channel: int, volts: float):
+    # -- Voltage / Current set ------------------------------------
+    def set_voltage(self, channel, volts):
         self._select_channel(channel)
-        self._write_raw(f"VOLT {volts:.6f}")
+        self._write_raw("VOLT {:.6f}".format(volts))
         if self._debug:
-            self._check_error(f"set_voltage CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} VOLT → {volts} V")
+            self._check_error("set_voltage CH{}".format(channel))
+        self._logger.info("{} CH{} VOLT -> {} V".format(self._name, channel, volts))
 
-    def set_current(self, channel: int, amps: float):
+    def set_current(self, channel, amps):
         self._select_channel(channel)
-        self._write_raw(f"CURR {amps:.6f}")
+        self._write_raw("CURR {:.6f}".format(amps))
         if self._debug:
-            self._check_error(f"set_current CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} CURR → {amps} A")
+            self._check_error("set_current CH{}".format(channel))
+        self._logger.info("{} CH{} CURR -> {} A".format(self._name, channel, amps))
 
-    def set_ovp(self, channel: int, volts: float):
+    def set_ovp(self, channel, volts):
         """Over-Voltage Protection limit."""
         self._select_channel(channel)
-        self._write_raw(f"VOLT:PROT {volts:.6f}")
+        self._write_raw("VOLT:PROT {:.6f}".format(volts))
         if self._debug:
-            self._check_error(f"set_ovp CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} OVP → {volts} V")
+            self._check_error("set_ovp CH{}".format(channel))
+        self._logger.info("{} CH{} OVP -> {} V".format(self._name, channel, volts))
 
-    def set_ocp(self, channel: int, amps: float):
+    def set_ocp(self, channel, amps):
         """Over-Current Protection limit."""
         self._select_channel(channel)
-        self._write_raw(f"CURR:PROT {amps:.6f}")
+        self._write_raw("CURR:PROT {:.6f}".format(amps))
         if self._debug:
-            self._check_error(f"set_ocp CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} OCP → {amps} A")
+            self._check_error("set_ocp CH{}".format(channel))
+        self._logger.info("{} CH{} OCP -> {} A".format(self._name, channel, amps))
 
-    def output_on(self, channel: int, enable: bool):
+    def output_on(self, channel, enable):
         self._select_channel(channel)
         state = "ON" if enable else "OFF"
-        self._write_raw(f"OUTP {state}")
+        self._write_raw("OUTP {}".format(state))
         if self._debug:
-            self._check_error(f"output_on CH{channel} {state}")
-        self._logger.info(f"{self._name} CH{channel} OUTPUT {state}")
+            self._check_error("output_on CH{} {}".format(channel, state))
+        self._logger.info("{} CH{} OUTPUT {}".format(self._name, channel, state))
 
-    # Alias to match reference outOnOff(ch, 0/1)
-    def outOnOff(self, channel: int, state):
+    def outOnOff(self, channel, state):
         self.output_on(channel, bool(state))
 
-    # ── OCP trip delay / enable / query / clear ───────────────────
-    def set_ocp_delay_start_cc(self, channel: int):
-        """
-        Configure OCP delay to start when the supply enters CC mode.
-        Matches setCurrProtectionDelayStartCC() in reference.
-        SCPI: CURR:PROT:DEL:STAR CC
-        """
+    # -- OCP trip delay / enable / query / clear ------------------
+    def set_ocp_delay_start_cc(self, channel):
+        """SCPI: CURR:PROT:DEL:STAR CC"""
         self._select_channel(channel)
         self._write_raw("CURR:PROT:DEL:STAR CC")
         if self._debug:
-            self._check_error(f"set_ocp_delay_start_cc CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} OCP delay start → CC")
+            self._check_error("set_ocp_delay_start_cc CH{}".format(channel))
+        self._logger.info("{} CH{} OCP delay start -> CC".format(self._name, channel))
 
-    # Alias to match reference
-    def setCurrProtectionDelayStartCC(self, channel: int):
+    def setCurrProtectionDelayStartCC(self, channel):
         self.set_ocp_delay_start_cc(channel)
 
-    def set_ocp_delay(self, channel: int, seconds: float):
-        """
-        Set OCP trip delay in seconds.
-        Matches setCurrProtectionDelay(ch, secs) in reference.
-        SCPI: CURR:PROT:DEL {secs}
-        """
+    def set_ocp_delay(self, channel, seconds):
+        """SCPI: CURR:PROT:DEL {secs}"""
         self._select_channel(channel)
-        self._write_raw(f"CURR:PROT:DEL {seconds:.3f}")
+        self._write_raw("CURR:PROT:DEL {:.3f}".format(seconds))
         if self._debug:
-            self._check_error(f"set_ocp_delay CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} OCP delay → {seconds} s")
+            self._check_error("set_ocp_delay CH{}".format(channel))
+        self._logger.info("{} CH{} OCP delay -> {} s".format(self._name, channel, seconds))
 
-    # Alias to match reference
-    def setCurrProtectionDelay(self, channel: int, seconds: float):
+    def setCurrProtectionDelay(self, channel, seconds):
         self.set_ocp_delay(channel, seconds)
 
-    def ocp_enable(self, channel: int, enable: bool):
-        """
-        Enable or disable Over-Current Protection.
-        Matches currProtectionOnOff(ch, 1/0) in reference.
-        SCPI: CURR:PROT:STAT ON|OFF
-        """
+    def ocp_enable(self, channel, enable):
+        """SCPI: CURR:PROT:STAT ON|OFF"""
         self._select_channel(channel)
         state = "ON" if enable else "OFF"
-        self._write_raw(f"CURR:PROT:STAT {state}")
+        self._write_raw("CURR:PROT:STAT {}".format(state))
         if self._debug:
-            self._check_error(f"ocp_enable CH{channel} {state}")
-        self._logger.info(f"{self._name} CH{channel} OCP → {state}")
+            self._check_error("ocp_enable CH{} {}".format(channel, state))
+        self._logger.info("{} CH{} OCP -> {}".format(self._name, channel, state))
 
-    # Alias to match reference
-    def currProtectionOnOff(self, channel: int, state):
+    def currProtectionOnOff(self, channel, state):
         self.ocp_enable(channel, bool(state))
 
-    def ocp_tripped(self, channel: int) -> bool:
-        """
-        Returns True if OCP has tripped on the given channel.
-        Matches askCurrProtectionTripped() in reference.
-        SCPI: CURR:PROT:TRIP?
-        """
+    def ocp_tripped(self, channel):
+        """SCPI: CURR:PROT:TRIP?"""
         self._select_channel(channel)
         raw = self._query_raw("CURR:PROT:TRIP?")
         try:
             return bool(int(raw))
         except (TypeError, ValueError):
             self._logger.warning(
-                f"{self._name} CH{channel} ocp_tripped: unexpected response '{raw}'")
+                "{} CH{} ocp_tripped: unexpected response '{}'".format(
+                    self._name, channel, raw))
             return False
 
-    def askCurrProtectionTripped(self, channel: int = 1) -> bool:
-        """Alias to match reference (reference calls without channel arg on ps1)."""
+    def askCurrProtectionTripped(self, channel=1):
         return self.ocp_tripped(channel)
 
-    def ocp_clear(self, channel: int):
-        """
-        Clear OCP trip latch on the given channel.
-        Matches clrOverCurrProtectionEvent(ch) in reference.
-        SCPI: CURR:PROT:CLE
-        """
+    def ocp_clear(self, channel):
+        """SCPI: CURR:PROT:CLE"""
         self._select_channel(channel)
         self._write_raw("CURR:PROT:CLE")
         if self._debug:
-            self._check_error(f"ocp_clear CH{channel}")
-        self._logger.info(f"{self._name} CH{channel} OCP latch cleared")
+            self._check_error("ocp_clear CH{}".format(channel))
+        self._logger.info("{} CH{} OCP latch cleared".format(self._name, channel))
 
-    # Alias to match reference
-    def clrOverCurrProtectionEvent(self, channel: int):
+    def clrOverCurrProtectionEvent(self, channel):
         self.ocp_clear(channel)
 
-    # ── Measure methods ────────────────────────────────────────
-    def measure_voltage(self, channel: int) -> float:
+    # -- Measure methods ------------------------------------------
+    def measure_voltage(self, channel):
         self._select_channel(channel)
         raw = self._query_raw("MEAS:VOLT?")
-        return self._parse_float(raw, f"measure_voltage CH{channel}")
+        return self._parse_float(raw, "measure_voltage CH{}".format(channel))
 
-    def measure_current(self, channel: int) -> float:
+    def measure_current(self, channel):
         self._select_channel(channel)
         raw = self._query_raw("MEAS:CURR?")
-        return self._parse_float(raw, f"measure_current CH{channel}")
+        return self._parse_float(raw, "measure_current CH{}".format(channel))
 
-    # Aliases to match reference measVolt / measCurr
-    def measVolt(self, channel: int) -> float:
+    def measVolt(self, channel):
         return self.measure_voltage(channel)
 
-    def measCurr(self, channel: int) -> float:
+    def measCurr(self, channel):
         return self.measure_current(channel)
 
-    def measure_all(self, channel: int) -> dict:
+    def measure_all(self, channel):
         """Return {'volt': float, 'curr': float} in one method call."""
         return {
             "volt": self.measure_voltage(channel),
             "curr": self.measure_current(channel),
         }
 
-    # ── Error / status helpers ──────────────────────────────────
-    def check_errors(self) -> list[str]:
+    # -- Error / status helpers -----------------------------------
+    def check_errors(self):
+        # type: () -> List[str]
         """Drain the SCPI error queue; return list of non-zero error strings."""
         errors = []
         if self._inst is None:
             return errors
-        for _ in range(20):   # max 20 errors in queue
+        for _ in range(20):
             resp = self._query_raw("SYST:ERR?")
             if resp is None or resp.startswith("+0") or resp.startswith("0,"):
                 break
             errors.append(resp)
-            self._logger.warning(f"{self._name} SCPI error: {resp}")
+            self._logger.warning("{} SCPI error: {}".format(self._name, resp))
         return errors
 
-    def _check_error(self, context: str):
+    def _check_error(self, context):
         errs = self.check_errors()
         if errs:
             self._logger.error(
-                f"{self._name} [{context}] SCPI errors: {errs}")
+                "{} [{}] SCPI errors: {}".format(self._name, context, errs))
 
-    # ── Low-level VISA helpers ─────────────────────────────────
-    def _write_raw(self, cmd: str):
+    # -- Low-level VISA helpers -----------------------------------
+    def _write_raw(self, cmd):
         """Write with inter-command delay."""
         self._ensure_connected()
         self._inst.write(cmd)
         time.sleep(INTER_CMD_DELAY)
 
-    def _query_raw(self, cmd: str) -> str | None:
+    def _query_raw(self, cmd):
+        # type: (str) -> Optional[str]
         """Query with inter-command delay; returns stripped string or None."""
         self._ensure_connected()
         try:
@@ -292,26 +260,28 @@ class KeysightE36xxSupply:
             return resp.strip()
         except Exception as e:
             self._logger.error(
-                f"{self._name} query '{cmd}' failed: {e}")
+                "{} query '{}' failed: {}".format(self._name, cmd, e))
             return None
 
-    def _parse_float(self, raw: str | None, context: str) -> float:
+    def _parse_float(self, raw, context):
+        # type: (Optional[str], str) -> float
         if raw is None:
             raise RuntimeError(
-                f"{self._name} [{context}]: no response from instrument")
+                "{} [{}]: no response from instrument".format(self._name, context))
         try:
             return float(raw)
         except ValueError:
             raise RuntimeError(
-                f"{self._name} [{context}]: cannot parse '{raw}' as float")
+                "{} [{}]: cannot parse '{}' as float".format(self._name, context, raw))
 
     def _ensure_connected(self):
         if self._inst is None:
             raise RuntimeError(
-                f"{self._name} is not connected. Call connect() first.")
+                "{} is not connected. Call connect() first.".format(self._name))
 
-    def _check(self, channel: int):
+    def _check(self, channel):
         self._ensure_connected()
         if not 1 <= channel <= self._channels:
             raise ValueError(
-                f"{self._name}: channel must be 1–{self._channels}, got {channel}")
+                "{}: channel must be 1-{}, got {}".format(
+                    self._name, self._channels, channel))
