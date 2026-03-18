@@ -7,13 +7,18 @@ from utils.live_poll_manager import LivePollManager
 
 _logger = get_logger(__name__)
 
-POWER_SUPPLIES = [
-    {"name": "Keysight_E36234A",      "channels": 2},
-    {"name": "Keysight_E36233A",      "channels": 2},
-    {"name": "Agilent_E3648A_GPIB15", "channels": 2},
-    {"name": "Agilent_E3648A_GPIB11", "channels": 2},
-    {"name": "HP_6633B",              "channels": 1},
-]
+# Channel counts per known supply model — used only to infer channels
+# when a driver doesn't expose a _channels attribute.
+_CHANNEL_COUNT_HINTS = {
+    "Keysight_E36234A":      4,
+    "Keysight_E36233A":      2,
+    "Agilent_E3648A_GPIB15": 2,
+    "Agilent_E3648A_GPIB11": 2,
+    "Agilent_3648A":         2,
+    "HP_6633B":              1,
+}
+
+_PS_ROLES = {"Power Supply", "power supply", "Power supply"}
 
 _COL_CHECK   = 0
 _COL_CHANNEL = 1
@@ -30,8 +35,20 @@ ALIASES_FILE         = "instrument_aliases.json"
 READBACK_INTERVAL_MS = 1500
 UI_REFRESH_MS        = 250
 
-# Locked cell sentinel value shown to the user
-_LOCKED = "—"
+_LOCKED = "\u2014"
+
+
+def _infer_channels(name: str, drv) -> int:
+    """Return channel count for a driver object."""
+    if hasattr(drv, "_channels"):
+        return int(drv._channels)
+    return _CHANNEL_COUNT_HINTS.get(name, 1)
+
+
+def _is_power_supply(drv) -> bool:
+    """Return True if the driver looks like a power supply."""
+    cls = drv.__class__.__name__.lower()
+    return any(k in cls for k in ("supply", "psu", "6633", "e364", "e362", "e363"))
 
 
 class PowerSupplyTab(ttk.Frame):
@@ -56,6 +73,7 @@ class PowerSupplyTab(ttk.Frame):
     # ── Public API ─────────────────────────────────────────────
     def set_driver_registry(self, registry: dict):
         self._registry = registry
+        self._init_channel_store()
 
     def set_aliases(self, alias_map: dict):
         self._alias_map = alias_map
@@ -108,6 +126,19 @@ class PowerSupplyTab(ttk.Frame):
             return f"{alias} CH{ch}  ({supply_name})"
         return f"{supply_name} CH{ch}"
 
+    # ── Connected power supply helpers ─────────────────────────
+    def _connected_supplies(self) -> list:
+        """
+        Return list of dicts for every power-supply driver currently in the
+        registry: {name, channels}.
+        Only drivers whose class name looks like a power supply are included.
+        """
+        result = []
+        for name, drv in self._registry.items():
+            if _is_power_supply(drv):
+                result.append({"name": name, "channels": _infer_channels(name, drv)})
+        return result
+
     # ── UI build ───────────────────────────────────────────────
     def _build_ui(self):
         ttk.Label(
@@ -118,20 +149,21 @@ class PowerSupplyTab(ttk.Frame):
         top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=(0, 4))
         ttk.Button(top, text="+ Add Supply", command=self._open_add_dialog).pack(side="left", padx=(0, 4))
+        ttk.Button(top, text="\u21bb Refresh", command=self._init_channel_store).pack(side="left", padx=(0, 4))
         ttk.Label(
             top,
-            text="Click a cell to edit inline.  Double-click opens full edit dialog.  — = locked by mode.",
+            text="Click a cell to edit inline.  Double-click opens full edit dialog.  \u2014 = locked by mode.",
             foreground="gray",
         ).pack(side="left", padx=12)
 
         pane = ttk.PanedWindow(self, orient="vertical")
         pane.pack(fill="both", expand=True, padx=10, pady=4)
 
-        avail_frame = ttk.LabelFrame(pane, text="Available Power Supplies  (select then click + Add Supply)")
+        avail_frame = ttk.LabelFrame(pane, text="Connected Power Supplies  (select then click + Add Supply)")
         pane.add(avail_frame, weight=1)
-        av_cols = ("Supply", "Alias", "Outputs", "Connected")
+        av_cols = ("Supply", "Alias", "Outputs")
         self.avail_tree = ttk.Treeview(avail_frame, columns=av_cols, show="headings", height=5)
-        for col, w in {"Supply": 240, "Alias": 200, "Outputs": 80, "Connected": 90}.items():
+        for col, w in {"Supply": 260, "Alias": 220, "Outputs": 80}.items():
             self.avail_tree.heading(col, text=col)
             self.avail_tree.column(col, width=w, anchor="center")
         self.avail_tree.pack(fill="both", expand=True, padx=5, pady=5)
@@ -139,17 +171,16 @@ class PowerSupplyTab(ttk.Frame):
         active_frame = ttk.LabelFrame(pane, text="Active Supplies")
         pane.add(active_frame, weight=4)
 
-        act_cols = ("☑", "Channel", "Role", "Mode", "Set V", "Set A", "Prot Limit", "Meas V", "Meas A", "Output")
+        act_cols = ("\u2611", "Channel", "Role", "Mode", "Set V", "Set A", "Prot Limit", "Meas V", "Meas A", "Output")
         self.tree = ttk.Treeview(active_frame, columns=act_cols, show="headings", height=13)
         for col, w in {
-            "☑": 34, "Channel": 260, "Role": 75, "Mode": 55,
+            "\u2611": 34, "Channel": 260, "Role": 75, "Mode": 55,
             "Set V": 80, "Set A": 80, "Prot Limit": 110,
             "Meas V": 90, "Meas A": 90, "Output": 70,
         }.items():
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor="center")
 
-        # Tag for locked (mode-blocked) cells — muted gray
         self.tree.tag_configure("locked", foreground="#888888")
 
         self.tree.pack(fill="both", expand=True, padx=5, pady=5)
@@ -194,7 +225,8 @@ class PowerSupplyTab(ttk.Frame):
     def _init_channel_store(self):
         existing = {k: v for k, v in self._channels.items()}
         self._channels.clear()
-        for ps in POWER_SUPPLIES:
+
+        for ps in self._connected_supplies():
             name = ps["name"]
             for ch in range(1, ps["channels"] + 1):
                 ch_id = f"{name}_CH{ch}"
@@ -215,27 +247,29 @@ class PowerSupplyTab(ttk.Frame):
                     "max_idq_ma":       prev.get("max_idq_ma",       tk.StringVar(value="")),
                 }
                 self._poll_manager.ensure_channel(ch_id)
+
+        # Remove active rows whose supply is no longer connected
+        self._active_rows = [r for r in self._active_rows if r in self._channels]
         self._poll_manager.remove_missing_channels(self._channels.keys())
         self._populate_available_tree()
         self._refresh_active_tree()
 
     def _populate_available_tree(self):
         self.avail_tree.delete(*self.avail_tree.get_children())
-        for ps in POWER_SUPPLIES:
-            name      = ps["name"]
-            alias     = self._alias_map.get(name, "")
-            connected = "Yes" if name in self._registry else "No"
+        for ps in self._connected_supplies():
+            name  = ps["name"]
+            alias = self._alias_map.get(name, "")
             self.avail_tree.insert("", "end", iid=name,
-                                   values=(name, alias, ps["channels"], connected))
+                                   values=(name, alias, ps["channels"]))
 
     # ── Active row management ──────────────────────────────────
     def _open_add_dialog(self):
         sel = self.avail_tree.selection()
         if not sel:
-            messagebox.showwarning("No Selection", "Select a supply from the Available list first.")
+            messagebox.showwarning("No Selection", "Select a supply from the Connected list first.")
             return
         supply_name = sel[0]
-        ps = next((x for x in POWER_SUPPLIES if x["name"] == supply_name), None)
+        ps = next((x for x in self._connected_supplies() if x["name"] == supply_name), None)
         if not ps:
             return
         dlg = tk.Toplevel(self)
@@ -297,15 +331,14 @@ class PowerSupplyTab(ttk.Frame):
 
     # ── Row values helper ────────────────────────────────────────
     def _row_values(self, ch_id: str, checked_str: str, meas_v="---", meas_a="---") -> tuple:
-        """Build the full values tuple for a row. Locked cells get the — sentinel."""
         info = self._channels[ch_id]
         mode = info["mode"]
         if mode == "CV":
             set_v = info["volt_var"].get() or ""
-            set_a = _LOCKED                              # CC-only — locked in CV mode
+            set_a = _LOCKED
             prot  = f"OCP {info['ocp_var'].get()} A" if info["ocp_var"].get() else ""
         else:
-            set_v = _LOCKED                              # CV-only — locked in CC mode
+            set_v = _LOCKED
             set_a = info["curr_var"].get() or ""
             prot  = f"OVP {info['ovp_var'].get()} V" if info["ovp_var"].get() else ""
         return (checked_str, info["label"], info["role"], mode,
@@ -317,9 +350,8 @@ class PowerSupplyTab(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for ch_id in self._active_rows:
             info    = self._channels[ch_id]
-            checked = "☑" if self._row_checked.get(ch_id, tk.BooleanVar(value=True)).get() else "☐"
+            checked = "\u2611" if self._row_checked.get(ch_id, tk.BooleanVar(value=True)).get() else "\u2610"
             vals    = self._row_values(ch_id, checked)
-            # Apply locked tag when either set cell is blocked
             tag = "locked" if info["mode"] in ("CV", "CC") else ""
             self.tree.insert("", "end", iid=ch_id, values=vals, tags=(tag,))
         self.tree.after(30, self._reposition_output_btns)
@@ -388,7 +420,6 @@ class PowerSupplyTab(ttk.Frame):
     }
 
     def _is_locked_col(self, ch_id: str, col_idx: int) -> bool:
-        """Return True if this column is blocked for this row's current mode."""
         mode = self._channels[ch_id]["mode"]
         if col_idx == _COL_SET_A and mode == "CV":
             return True
@@ -412,7 +443,6 @@ class PowerSupplyTab(ttk.Frame):
             return
         if col_idx not in self._INLINE_COLS:
             return
-        # Block edit if cell is locked by mode
         if self._is_locked_col(ch_id, col_idx):
             return
         self._open_inline(ch_id, col_idx, col_id, self._INLINE_COLS[col_idx])
@@ -432,7 +462,7 @@ class PowerSupplyTab(ttk.Frame):
             return
         x, y, w, h = bbox
         info = self._channels[ch_id]
-        if col_idx == _COL_ROLE:  cur_val = info["role"]
+        if col_idx == _COL_ROLE:   cur_val = info["role"]
         elif col_idx == _COL_MODE: cur_val = info["mode"]
         elif col_idx == _COL_SET_V: cur_val = info["volt_var"].get()
         elif col_idx == _COL_SET_A: cur_val = info["curr_var"].get()
@@ -472,7 +502,7 @@ class PowerSupplyTab(ttk.Frame):
     def _apply_inline(self, ch_id, col_idx, value):
         info  = self._channels[ch_id]
         value = value.strip()
-        if col_idx == _COL_ROLE:   info["role"] = value
+        if col_idx == _COL_ROLE:    info["role"] = value
         elif col_idx == _COL_MODE:
             if value in ("CV", "CC"): info["mode"] = value
         elif col_idx == _COL_SET_V: info["volt_var"].set(value)
@@ -516,12 +546,12 @@ class PowerSupplyTab(ttk.Frame):
 
         mode_frame = ttk.LabelFrame(dialog, text="Output Mode")
         mode_frame.grid(row=2, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
-        ttk.Radiobutton(mode_frame, text="CV — Constant Voltage", variable=mode_var, value="CV",
+        ttk.Radiobutton(mode_frame, text="CV \u2014 Constant Voltage", variable=mode_var, value="CV",
                         command=lambda: _refresh_val_rows()).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
         ttk.Label(mode_frame,
                   text="You set: Voltage (V)  +  OCP Limit (A)\nSupply holds the voltage. Trips off if current exceeds OCP.",
                   foreground="gray", justify="left").grid(row=1, column=0, padx=28, pady=(0, 6), sticky="w")
-        ttk.Radiobutton(mode_frame, text="CC — Constant Current", variable=mode_var, value="CC",
+        ttk.Radiobutton(mode_frame, text="CC \u2014 Constant Current", variable=mode_var, value="CC",
                         command=lambda: _refresh_val_rows()).grid(row=2, column=0, padx=12, pady=(4, 2), sticky="w")
         ttk.Label(mode_frame,
                   text="You set: Current (A)  +  OVP Limit (V)\nSupply holds the current. Trips off if voltage exceeds OVP.",
@@ -567,10 +597,10 @@ class PowerSupplyTab(ttk.Frame):
             if hint:
                 ttk.Label(parent, text=hint, foreground="gray").grid(row=row, column=2, padx=4, sticky="w")
 
-        idq_row(idq_frame, "Target Idq (mA):",     info["target_idq_ma"],    0, "Leave blank to skip")
+        idq_row(idq_frame, "Target Idq (mA):",       info["target_idq_ma"],    0, "Leave blank to skip")
         idq_row(idq_frame, "Tolerance \u00b1 (mA):", info["idq_tolerance_ma"], 1, "Default: 5 mA")
-        idq_row(idq_frame, "Gate Step Size (mV):", info["idq_step_mv"],      2, "Default: 50 mV")
-        idq_row(idq_frame, "Hard Abort > (mA):",   info["max_idq_ma"],       3, "Leave blank = 3\u00d7 target")
+        idq_row(idq_frame, "Gate Step Size (mV):",   info["idq_step_mv"],      2, "Default: 50 mV")
+        idq_row(idq_frame, "Hard Abort > (mA):",     info["max_idq_ma"],       3, "Leave blank = 3\u00d7 target")
         ttk.Label(idq_frame,
                   text="Set on the DRAIN channel. The sequencer walks gate voltage\ntoward final gate V while monitoring drain current.",
                   foreground="gray").grid(row=4, column=0, columnspan=3, padx=8, pady=(0, 6))
