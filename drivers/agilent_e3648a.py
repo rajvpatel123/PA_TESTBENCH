@@ -2,6 +2,12 @@
 """
 Driver for Agilent E3648A dual-output power supply (GPIB).
 Channel selection uses INST:SEL OUT{n} — NOT INST:NSEL.
+
+NOTE: The E3648A does not have a separate OCP protection register.
+      The current limit IS the protection limit — CURR {amps} is the
+      correct command for both set_current() and set_ocp(). Using
+      CURR:PROT on this instrument causes it to revert to the hardware
+      maximum (5 A) on some firmware versions.
 """
 from utils.visa_manager import get_visa_rm
 from utils.logger import get_logger
@@ -76,12 +82,19 @@ class AgilentE3648ASupply:
             f"{self._name} CH{channel} OVP set to {volts} V")
 
     def set_ocp(self, channel: int, amps: float):
-        """Set Over-Current Protection limit."""
+        """
+        Set current limit (OCP) for the E3648A.
+
+        The E3648A does NOT have a separate CURR:PROT register — the current
+        limit IS the protection limit. Using CURR:PROT on this instrument
+        causes it to silently revert to the hardware maximum (5 A).
+        Correct command is CURR, identical to set_current().
+        """
         self._check_channel(channel)
         self._select_channel(channel)
-        self._inst.write(f"CURR:PROT {amps}")
+        self._inst.write(f"CURR {amps}")
         self._logger.info(
-            f"{self._name} CH{channel} OCP set to {amps} A")
+            f"{self._name} CH{channel} OCP (current limit) set to {amps} A")
 
     def output_on(self, channel: int, enable: bool):
         self._check_channel(channel)
