@@ -21,7 +21,7 @@ from drivers import (
 _logger = get_logger(__name__)
 _rm = None  # singleton ResourceManager
 
-# ── Instrument type tags ───────────────────────────────────────
+# ── Instrument type tags ──────────────────────────────────────
 # Each entry maps a set of name fragments to a canonical role string.
 # Used by find_driver() to locate instruments without hardcoded keys.
 _ROLE_HINTS = {
@@ -122,17 +122,12 @@ def load_driver(address: str):
         drv.connect()
         return drv
 
-    if addr.startswith("GPIB0::15") or addr.startswith("GPIB0::11"):
+    if addr.startswith("GPIB0::15") or addr.startswith("GPIB0::11") or addr.startswith("GPIB0::10"):
         drv = AgilentE3648ASupply(addr)
         drv.connect()
         return drv
 
-    if addr.startswith("GPIB0::10"):
-        drv = HP6633BSupply(addr)
-        drv.connect()
-        return drv
-
-    # ── DMMs ───────────────────────────────────────────────────
+    # ── DMMs ───────────────────────────────────────────────
     if "0x2A8D::0x0101" in addr or "0x2A8D::0x1301" in addr:
         drv = Keysight3446xDMM(addr)
         drv.connect()
@@ -144,7 +139,7 @@ def load_driver(address: str):
         drv.connect()
         return drv
 
-    # ── Signal generator ───────────────────────────────────────
+    # ── Signal generator ──────────────────────────────────────
     if addr.startswith("GPIB0::28"):
         drv = RSSMBV100B(addr)
         drv.connect()
