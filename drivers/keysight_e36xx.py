@@ -75,6 +75,15 @@ class KeysightE36xxSupply:
         finally:
             self._inst = None
 
+    # -- Pass-through helpers (used by device_info_tab) -----------
+    def query(self, cmd: str) -> str:
+        """Direct SCPI query pass-through (used for *IDN?, *TST? etc)."""
+        return self._query_raw(cmd) or ""
+
+    def write(self, cmd: str):
+        """Direct SCPI write pass-through (used for *RST, *CLS etc)."""
+        self._write_raw(cmd)
+
     # -- Identification -------------------------------------------
     def idn(self):
         if self._inst is None:
