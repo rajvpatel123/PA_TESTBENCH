@@ -18,8 +18,8 @@ _logger = get_logger(__name__)
 ALIASES_FILE = "instrument_aliases.json"
 
 COMPANY_INSTRUMENTS = [
-    {"name": "Keysight_E36234A",      "address": "USB0::0x2A8D::0x3402::MY61002290::INSTR", "role": "Power Supply"},
-    {"name": "Keysight_E36233A",      "address": "USB0::0x2A8D::0x3302::MY61003932::INSTR", "role": "Power Supply"},
+    {"name": "Keysight_E36234A_90",      "address": "USB0::0x2A8D::0x3402::MY61002290::INSTR", "role": "Power Supply"},
+    {"name": "Keysight_E36233A_32",      "address": "USB0::0x2A8D::0x3302::MY61003932::INSTR", "role": "Power Supply"},
     {"name": "Agilent_E3648A_GPIB15", "address": "GPIB0::15::INSTR",                        "role": "Power Supply"},
     {"name": "Agilent_E3648A_GPIB11", "address": "GPIB0::11::INSTR",                        "role": "Power Supply"},
     {"name": "Agilent_3648A",         "address": "GPIB0::10::INSTR",                        "role": "Power Supply"},
