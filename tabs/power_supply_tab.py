@@ -549,7 +549,7 @@ class PowerSupplyTab(ttk.Frame):
         ttk.Radiobutton(mode_frame, text="CV \u2014 Constant Voltage", variable=mode_var, value="CV",
                         command=lambda: _refresh_val_rows()).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
         ttk.Label(mode_frame,
-                  text="You set: Voltage (V)  +  OCP Limit (A)\nSupply holds the voltage. Trips off if current exceeds OCP.",
+                  text="You set: Voltage (V)  +  Current Limit / OCP (A)\nSupply holds the voltage. Current limit caps output current.",
                   foreground="gray", justify="left").grid(row=1, column=0, padx=28, pady=(0, 6), sticky="w")
         ttk.Radiobutton(mode_frame, text="CC \u2014 Constant Current", variable=mode_var, value="CC",
                         command=lambda: _refresh_val_rows()).grid(row=2, column=0, padx=12, pady=(4, 2), sticky="w")
@@ -561,7 +561,7 @@ class PowerSupplyTab(ttk.Frame):
         vals_frame.grid(row=3, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
         lbl_volt  = ttk.Label(vals_frame, text="Set Voltage (V):", width=20, anchor="e")
         ent_volt  = ttk.Entry(vals_frame, textvariable=info["volt_var"], width=14)
-        lbl_ocp   = ttk.Label(vals_frame, text="OCP Limit (A):",   width=20, anchor="e")
+        lbl_ocp   = ttk.Label(vals_frame, text="Current Limit / OCP (A):", width=24, anchor="e")
         ent_ocp   = ttk.Entry(vals_frame, textvariable=info["ocp_var"],  width=14)
         lbl_curr  = ttk.Label(vals_frame, text="Set Current (A):", width=20, anchor="e")
         ent_curr  = ttk.Entry(vals_frame, textvariable=info["curr_var"], width=14)
@@ -674,11 +674,19 @@ class PowerSupplyTab(ttk.Frame):
                     ):
                         return
                 drv.set_voltage(info["channel"], volts)
-                if ocp_str: drv.set_ocp(info["channel"], float(ocp_str))
+                if ocp_str:
+                    amps = float(ocp_str)
+                    # set_current sets the hardware current limit (CURR command).
+                    # set_ocp sets the protection trip threshold (CURR:PROT on Keysight).
+                    # Both are sent so instruments with separate registers (e.g. Keysight)
+                    # have the current limit correctly applied, not just the OCP trip point.
+                    if hasattr(drv, "set_current"):
+                        drv.set_current(info["channel"], amps)
+                    drv.set_ocp(info["channel"], amps)
                 self.status_lbl.config(
-                    text=f"Set {info['label']}: {volts} V  | OCP = {ocp_str or 'unchanged'} A",
+                    text=f"Set {info['label']}: {volts} V  | Curr Limit = {ocp_str or 'unchanged'} A",
                     foreground="blue")
-                _logger.info(f"Set {ch_id} CV: {volts} V  OCP={ocp_str}")
+                _logger.info(f"Set {ch_id} CV: {volts} V  curr_limit/OCP={ocp_str}")
             else:
                 curr_str = info["curr_var"].get().strip()
                 ovp_str  = info["ovp_var"].get().strip()
